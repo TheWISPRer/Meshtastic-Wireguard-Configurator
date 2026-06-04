@@ -6,11 +6,12 @@ from __future__ import annotations
 import argparse
 import configparser
 import json
+import socket
 import sys
 import time
 from pathlib import Path
 from threading import Event
-from typing import Any
+from typing import Any, Callable
 
 SECRET = "sekrit"
 
@@ -99,13 +100,39 @@ def _parse_tcp_target(host: str, tcp_port: int) -> tuple[str, int]:
     return host, tcp_port
 
 
-def _open_interface(port: str | None = None, *, host: str | None = None, tcp_port: int = 4403):
+ProgressCallback = Callable[[str], None]
+CancelEvent = Any
+InterfaceCallback = Callable[[Any], None]
+
+
+def _check_cancel(cancel_event: CancelEvent | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("Operation cancelled.")
+
+
+def _progress(progress: ProgressCallback | None, message: str) -> None:
+    if progress:
+        progress(message)
+
+
+def _open_interface(
+    port: str | None = None,
+    *,
+    host: str | None = None,
+    tcp_port: int = 4403,
+    timeout: int = 10,
+):
     serial_interface, tcp_interface, _, _ = _import_meshtastic()
     if port and host:
         raise SystemExit("Use either --port for serial or --host for TCP, not both.")
     if host:
         hostname, port_number = _parse_tcp_target(host, tcp_port)
-        return tcp_interface(hostname=hostname, portNumber=port_number)
+        try:
+            with socket.create_connection((hostname, port_number), timeout=timeout):
+                pass
+        except OSError as exc:
+            raise RuntimeError(f"Unable to reach Meshtastic TCP API at {hostname}:{port_number}: {exc}") from exc
+        return tcp_interface(hostname=hostname, portNumber=port_number, timeout=timeout)
     if port:
         return serial_interface(devPath=port)
     return serial_interface()
@@ -121,7 +148,14 @@ def _new_wireguard_config():
     return module_config_pb2.ModuleConfig.WireGuardConfig()
 
 
-def _refresh_wireguard_config(node: Any, delay: float = 5.0) -> None:
+def _refresh_wireguard_config(
+    node: Any,
+    delay: float = 5.0,
+    *,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+) -> None:
+    _check_cancel(cancel_event)
     config = _wireguard_config(node)
     admin = _admin_message()
     admin.get_module_config_request = admin.ModuleConfigType.Value("WIREGUARD_CONFIG")
@@ -134,8 +168,14 @@ def _refresh_wireguard_config(node: Any, delay: float = 5.0) -> None:
         finally:
             received.set()
 
+    _progress(progress, "Sent WireGuard config read request.")
     node._sendAdmin(admin, wantResponse=True, onResponse=on_response)
-    received.wait(delay)
+    _progress(progress, "Waiting for device response.")
+    if not received.wait(delay):
+        _check_cancel(cancel_event)
+        raise TimeoutError("Timed out waiting for WireGuard config response.")
+    _check_cancel(cancel_event)
+    _progress(progress, "Confirmed device response.")
 
 
 def _wireguard_config(node: Any):
@@ -267,7 +307,15 @@ def _apply_config_file_defaults(args: argparse.Namespace) -> None:
             setattr(args, field, value)
 
 
-def _write_config(node: Any, config: Any, args: argparse.Namespace) -> Any:
+def _write_config(
+    node: Any,
+    config: Any,
+    args: argparse.Namespace,
+    *,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+) -> Any:
+    _check_cancel(cancel_event)
     _apply_config_file_defaults(args)
 
     outgoing = _new_wireguard_config()
@@ -290,8 +338,12 @@ def _write_config(node: Any, config: Any, args: argparse.Namespace) -> Any:
     admin = _admin_message()
     admin.set_module_config.wireguard.CopyFrom(outgoing)
     on_response = None if node == node.iface.localNode else node.onAckNak
+    _progress(progress, "Sent WireGuard config write request.")
     node._sendAdmin(admin, onResponse=on_response)
-    time.sleep(2.0)
+    _progress(progress, "Waiting for write to settle.")
+    for _ in range(20):
+        time.sleep(0.1)
+        _check_cancel(cancel_event)
     return outgoing
 
 
@@ -301,10 +353,18 @@ def read_wireguard_config(
     *,
     host: str | None = None,
     tcp_port: int = 4403,
+    timeout: int = 10,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+    interface_callback: InterfaceCallback | None = None,
 ) -> dict[str, Any]:
-    iface = _open_interface(port, host=host, tcp_port=tcp_port)
+    _progress(progress, "Opening device connection.")
+    iface = _open_interface(port, host=host, tcp_port=tcp_port, timeout=timeout)
+    if interface_callback:
+        interface_callback(iface)
     try:
-        _refresh_wireguard_config(iface.localNode)
+        _progress(progress, "Connected to device.")
+        _refresh_wireguard_config(iface.localNode, progress=progress, cancel_event=cancel_event)
         return _to_dict(_wireguard_config(iface.localNode), show_secrets)
     finally:
         iface.close()
@@ -316,6 +376,10 @@ def set_wireguard_config(
     *,
     host: str | None = None,
     tcp_port: int = 4403,
+    timeout: int = 10,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+    interface_callback: InterfaceCallback | None = None,
     enable: bool = False,
     disable: bool = False,
     show_secrets: bool = False,
@@ -339,23 +403,43 @@ def set_wireguard_config(
         preshared_key=preshared_key,
     )
 
-    iface = _open_interface(port, host=host, tcp_port=tcp_port)
+    _progress(progress, "Opening device connection.")
+    iface = _open_interface(port, host=host, tcp_port=tcp_port, timeout=timeout)
+    if interface_callback:
+        interface_callback(iface)
     try:
+        _progress(progress, "Connected to device.")
         node = iface.localNode
-        written = _write_config(node, _wireguard_config(node), args)
+        written = _write_config(node, _wireguard_config(node), args, progress=progress, cancel_event=cancel_event)
     finally:
         iface.close()
 
+    _progress(progress, "Reading back saved config.")
     return {
         "written": _to_dict(written, show_secrets),
-        "confirmed": read_wireguard_config(port, show_secrets, host=host, tcp_port=tcp_port),
+        "confirmed": read_wireguard_config(
+            port,
+            show_secrets,
+            host=host,
+            tcp_port=tcp_port,
+            timeout=timeout,
+            progress=progress,
+            cancel_event=cancel_event,
+            interface_callback=interface_callback,
+        ),
     }
 
 
 def do_get(args: argparse.Namespace) -> int:
     print(
         json.dumps(
-            read_wireguard_config(args.port, args.show_secrets, host=args.host, tcp_port=args.tcp_port),
+            read_wireguard_config(
+                args.port,
+                args.show_secrets,
+                host=args.host,
+                tcp_port=args.tcp_port,
+                timeout=args.timeout,
+            ),
             indent=2,
         )
     )
@@ -368,6 +452,7 @@ def do_set(args: argparse.Namespace) -> int:
         args.config,
         host=args.host,
         tcp_port=args.tcp_port,
+        timeout=args.timeout,
         enable=args.enable,
         disable=args.disable,
         show_secrets=args.show_secrets,
@@ -400,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     transport.add_argument("--port", help="Serial device path. Omit transport options for serial auto-detection.")
     transport.add_argument("--host", help="Meshtastic TCP API host or host:port.")
     parser.add_argument("--tcp-port", type=int, default=4403, help="Meshtastic TCP API port when --host has no port.")
+    parser.add_argument("--timeout", type=int, default=10, help="TCP connection and readback timeout in seconds.")
     parser.add_argument("--show-secrets", action="store_true", help="Print private and preshared keys in command output.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -429,7 +515,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

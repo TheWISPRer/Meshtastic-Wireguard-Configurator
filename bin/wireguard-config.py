@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import errno
 import json
+import select
 import socket
 import sys
 import time
@@ -115,6 +117,90 @@ def _progress(progress: ProgressCallback | None, message: str) -> None:
         progress(message)
 
 
+def _connect_tcp_socket(
+    hostname: str,
+    port_number: int,
+    timeout: int,
+    *,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+) -> socket.socket:
+    _progress(progress, f"Checking TCP API at {hostname}:{port_number}.")
+    deadline = time.monotonic() + timeout
+    errors: list[str] = []
+    in_progress = {
+        errno.EINPROGRESS,
+        errno.EWOULDBLOCK,
+        getattr(errno, "WSAEWOULDBLOCK", 10035),
+        getattr(errno, "WSAEINPROGRESS", 10036),
+        getattr(errno, "WSAEALREADY", 10037),
+    }
+
+    try:
+        candidates = socket.getaddrinfo(hostname, port_number, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise RuntimeError(f"Unable to resolve Meshtastic TCP API host {hostname}: {exc}") from exc
+
+    for family, socktype, proto, _, address in candidates:
+        sock: socket.socket | None = None
+        try:
+            _check_cancel(cancel_event)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock = socket.socket(family, socktype, proto)
+            sock.setblocking(False)
+            result = sock.connect_ex(address)
+            if result == 0:
+                sock.setblocking(True)
+                sock.settimeout(timeout)
+                return sock
+            if result not in in_progress:
+                raise OSError(result, errno.errorcode.get(result, "connect failed"))
+
+            while True:
+                _check_cancel(cancel_event)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("timed out")
+                _, writable, exceptional = select.select([], [sock], [sock], min(0.1, remaining))
+                if exceptional:
+                    raise OSError("socket exception during connect")
+                if writable:
+                    socket_error = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+                    if socket_error:
+                        raise OSError(socket_error, errno.errorcode.get(socket_error, "connect failed"))
+                    sock.setblocking(True)
+                    sock.settimeout(timeout)
+                    return sock
+        except OSError as exc:
+            errors.append(str(exc))
+            if sock is not None:
+                sock.close()
+        except Exception:
+            if sock is not None:
+                sock.close()
+            raise
+
+    detail = errors[-1] if errors else "timed out"
+    raise RuntimeError(f"Unable to reach Meshtastic TCP API at {hostname}:{port_number}: {detail}")
+
+
+def _patch_wait_connected(iface: Any, timeout: int, cancel_event: CancelEvent | None) -> None:
+    def wait_connected(timeout_arg: float = 30.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            _check_cancel(cancel_event)
+            if iface.isConnected.wait(0.1):
+                break
+        else:
+            raise RuntimeError("Timed out waiting for connection completion.")
+        if iface.failure:
+            raise iface.failure
+
+    iface._waitConnected = wait_connected
+
+
 def _open_interface(
     port: str | None = None,
     *,
@@ -131,11 +217,13 @@ def _open_interface(
     if host:
         hostname, port_number = _parse_tcp_target(host, tcp_port)
         _check_cancel(cancel_event)
-        try:
-            with socket.create_connection((hostname, port_number), timeout=timeout):
-                pass
-        except OSError as exc:
-            raise RuntimeError(f"Unable to reach Meshtastic TCP API at {hostname}:{port_number}: {exc}") from exc
+        sock = _connect_tcp_socket(
+            hostname,
+            port_number,
+            timeout,
+            progress=progress,
+            cancel_event=cancel_event,
+        )
         _progress(progress, f"TCP port reachable: {hostname}:{port_number}")
 
         iface = tcp_interface(
@@ -148,10 +236,10 @@ def _open_interface(
         if interface_callback:
             interface_callback(iface)
         _check_cancel(cancel_event)
+        _patch_wait_connected(iface, timeout, cancel_event)
         _progress(progress, "Starting Meshtastic API handshake.")
-        iface.socket = socket.create_connection((hostname, port_number), timeout=timeout)
+        iface.socket = sock
         iface.connect()
-        iface.waitForConfig()
         _check_cancel(cancel_event)
         return iface
     if port:

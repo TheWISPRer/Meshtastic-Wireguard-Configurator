@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import json
 import queue
 import subprocess
@@ -19,6 +20,7 @@ from typing import Any, Callable
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
 CONFIG_SCRIPT = BUNDLE_DIR / "wireguard-config.py"
+APP_BUILD = "network3"
 
 
 def _load_config_api():
@@ -58,6 +60,7 @@ class WireGuardClient(tk.Tk):
 
         self._build_vars()
         self._build_ui()
+        self._log(f"App build {APP_BUILD}.")
         self._refresh_ports()
         self.after(100, self._drain_events)
 
@@ -195,10 +198,15 @@ class WireGuardClient(tk.Tk):
             if tcp_port <= 0 or tcp_port > 65535:
                 raise ValueError("TCP port must be between 1 and 65535.")
             try:
-                wg_api._parse_tcp_target(host, tcp_port)
+                target_host, _ = wg_api._parse_tcp_target(host, tcp_port)
             except BaseException as exc:
                 raise ValueError(str(exc)) from exc
-            return {"port": None, "host": host, "tcp_port": tcp_port, "timeout": 10}
+            if all(char.isdigit() or char == "." for char in target_host):
+                try:
+                    ipaddress.ip_address(target_host)
+                except ValueError as exc:
+                    raise ValueError("Network host looks like an incomplete or invalid IP address.") from exc
+            return {"port": None, "host": host, "tcp_port": tcp_port, "timeout": 5}
 
         port = self._selected_port()
         if not port:

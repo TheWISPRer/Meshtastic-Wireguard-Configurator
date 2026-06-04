@@ -38,12 +38,13 @@ def _import_meshtastic():
         from meshtastic.mesh_interface import MeshInterface
         from meshtastic.protobuf import admin_pb2, mesh_pb2, module_config_pb2
         from meshtastic.serial_interface import SerialInterface
+        from meshtastic.tcp_interface import TCPInterface
     except ModuleNotFoundError as exc:
         raise SystemExit(
             "meshtastic-python is required. Install it in your active Python environment first."
         ) from exc
     _patch_wireguard_module_config_copy(MeshInterface, mesh_pb2)
-    return SerialInterface, admin_pb2, module_config_pb2
+    return SerialInterface, TCPInterface, admin_pb2, module_config_pb2
 
 
 def _patch_wireguard_module_config_copy(mesh_interface: Any, mesh_pb2: Any) -> None:
@@ -64,20 +65,59 @@ def _patch_wireguard_module_config_copy(mesh_interface: Any, mesh_pb2: Any) -> N
     mesh_interface._wireguard_patch_applied = True
 
 
-def _open_interface(port: str | None):
-    serial_interface, _, _ = _import_meshtastic()
+def _parse_tcp_target(host: str, tcp_port: int) -> tuple[str, int]:
+    host = host.strip()
+    if not host:
+        raise SystemExit("TCP host is empty.")
+
+    if host.startswith("["):
+        end = host.find("]")
+        if end == -1:
+            raise SystemExit("IPv6 TCP hosts must use [host] or [host]:port syntax.")
+        hostname = host[1:end]
+        if len(host) > end + 1:
+            if host[end + 1] != ":":
+                raise SystemExit("IPv6 TCP hosts must use [host] or [host]:port syntax.")
+            try:
+                tcp_port = int(host[end + 2 :])
+            except ValueError as exc:
+                raise SystemExit(f"TCP port is not an integer: {host[end + 2 :]!r}") from exc
+        host = hostname
+
+    elif host.count(":") == 1:
+        hostname, port_text = host.rsplit(":", 1)
+        try:
+            tcp_port = int(port_text)
+        except ValueError as exc:
+            raise SystemExit(f"TCP port is not an integer: {port_text!r}") from exc
+        host = hostname
+
+    if not host:
+        raise SystemExit("TCP host is empty.")
+    if tcp_port <= 0 or tcp_port > 65535:
+        raise SystemExit(f"TCP port is out of range: {tcp_port}")
+    return host, tcp_port
+
+
+def _open_interface(port: str | None = None, *, host: str | None = None, tcp_port: int = 4403):
+    serial_interface, tcp_interface, _, _ = _import_meshtastic()
+    if port and host:
+        raise SystemExit("Use either --port for serial or --host for TCP, not both.")
+    if host:
+        hostname, port_number = _parse_tcp_target(host, tcp_port)
+        return tcp_interface(hostname=hostname, portNumber=port_number)
     if port:
         return serial_interface(devPath=port)
     return serial_interface()
 
 
 def _admin_message():
-    _, admin_pb2, _ = _import_meshtastic()
+    _, _, admin_pb2, _ = _import_meshtastic()
     return admin_pb2.AdminMessage()
 
 
 def _new_wireguard_config():
-    _, _, module_config_pb2 = _import_meshtastic()
+    _, _, _, module_config_pb2 = _import_meshtastic()
     return module_config_pb2.ModuleConfig.WireGuardConfig()
 
 
@@ -255,8 +295,14 @@ def _write_config(node: Any, config: Any, args: argparse.Namespace) -> Any:
     return outgoing
 
 
-def read_wireguard_config(port: str | None, show_secrets: bool = False) -> dict[str, Any]:
-    iface = _open_interface(port)
+def read_wireguard_config(
+    port: str | None = None,
+    show_secrets: bool = False,
+    *,
+    host: str | None = None,
+    tcp_port: int = 4403,
+) -> dict[str, Any]:
+    iface = _open_interface(port, host=host, tcp_port=tcp_port)
     try:
         _refresh_wireguard_config(iface.localNode)
         return _to_dict(_wireguard_config(iface.localNode), show_secrets)
@@ -265,9 +311,11 @@ def read_wireguard_config(port: str | None, show_secrets: bool = False) -> dict[
 
 
 def set_wireguard_config(
-    port: str | None,
+    port: str | None = None,
     config_path: str | None = None,
     *,
+    host: str | None = None,
+    tcp_port: int = 4403,
     enable: bool = False,
     disable: bool = False,
     show_secrets: bool = False,
@@ -291,7 +339,7 @@ def set_wireguard_config(
         preshared_key=preshared_key,
     )
 
-    iface = _open_interface(port)
+    iface = _open_interface(port, host=host, tcp_port=tcp_port)
     try:
         node = iface.localNode
         written = _write_config(node, _wireguard_config(node), args)
@@ -300,12 +348,17 @@ def set_wireguard_config(
 
     return {
         "written": _to_dict(written, show_secrets),
-        "confirmed": read_wireguard_config(port, show_secrets),
+        "confirmed": read_wireguard_config(port, show_secrets, host=host, tcp_port=tcp_port),
     }
 
 
 def do_get(args: argparse.Namespace) -> int:
-    print(json.dumps(read_wireguard_config(args.port, args.show_secrets), indent=2))
+    print(
+        json.dumps(
+            read_wireguard_config(args.port, args.show_secrets, host=args.host, tcp_port=args.tcp_port),
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -313,6 +366,8 @@ def do_set(args: argparse.Namespace) -> int:
     result = set_wireguard_config(
         args.port,
         args.config,
+        host=args.host,
+        tcp_port=args.tcp_port,
         enable=args.enable,
         disable=args.disable,
         show_secrets=args.show_secrets,
@@ -341,7 +396,10 @@ def do_disable(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", help="Serial device path. Omit for meshtastic-python auto-detection.")
+    transport = parser.add_mutually_exclusive_group()
+    transport.add_argument("--port", help="Serial device path. Omit transport options for serial auto-detection.")
+    transport.add_argument("--host", help="Meshtastic TCP API host or host:port.")
+    parser.add_argument("--tcp-port", type=int, default=4403, help="Meshtastic TCP API port when --host has no port.")
     parser.add_argument("--show-secrets", action="store_true", help="Print private and preshared keys in command output.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)

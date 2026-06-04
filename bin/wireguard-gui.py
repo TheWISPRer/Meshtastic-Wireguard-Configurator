@@ -58,7 +58,10 @@ class WireGuardClient(tk.Tk):
         self.after(100, self._drain_events)
 
     def _build_vars(self) -> None:
+        self.transport_var = tk.StringVar(value="serial")
         self.port_var = tk.StringVar()
+        self.host_var = tk.StringVar()
+        self.tcp_port_var = tk.StringVar(value="4403")
         self.config_path_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Idle")
         self.connection_var = tk.StringVar(value="Disconnected")
@@ -78,25 +81,39 @@ class WireGuardClient(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         root.columnconfigure(1, weight=1)
-        root.rowconfigure(4, weight=1)
+        root.rowconfigure(6, weight=1)
 
-        ttk.Label(root, text="Port").grid(row=0, column=0, sticky="w")
+        ttk.Label(root, text="Connection").grid(row=0, column=0, sticky="w")
+        mode_row = ttk.Frame(root)
+        mode_row.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        ttk.Radiobutton(mode_row, text="Serial", value="serial", variable=self.transport_var).grid(row=0, column=0)
+        ttk.Radiobutton(mode_row, text="Network", value="tcp", variable=self.transport_var).grid(row=0, column=1, padx=(10, 0))
+
+        ttk.Label(root, text="Port").grid(row=1, column=0, sticky="w", pady=(10, 0))
         port_row = ttk.Frame(root)
-        port_row.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        port_row.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
         port_row.columnconfigure(0, weight=1)
         self.port_combo = ttk.Combobox(port_row, textvariable=self.port_var, state="readonly")
         self.port_combo.grid(row=0, column=0, sticky="ew")
         ttk.Button(port_row, text="Refresh", command=self._refresh_ports).grid(row=0, column=1, padx=(8, 0))
 
-        ttk.Label(root, text="Config").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(root, text="Network").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        network_row = ttk.Frame(root)
+        network_row.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
+        network_row.columnconfigure(0, weight=1)
+        ttk.Entry(network_row, textvariable=self.host_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(network_row, text="TCP").grid(row=0, column=1, padx=(8, 4))
+        ttk.Entry(network_row, width=8, textvariable=self.tcp_port_var).grid(row=0, column=2)
+
+        ttk.Label(root, text="Config").grid(row=3, column=0, sticky="w", pady=(10, 0))
         config_row = ttk.Frame(root)
-        config_row.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
+        config_row.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(10, 0))
         config_row.columnconfigure(0, weight=1)
         ttk.Entry(config_row, textvariable=self.config_path_var).grid(row=0, column=0, sticky="ew")
         ttk.Button(config_row, text="Browse", command=self._browse_config).grid(row=0, column=1, padx=(8, 0))
 
         actions = ttk.Frame(root)
-        actions.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
+        actions.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(12, 0))
         ttk.Button(actions, text="Push Config", command=self._push_config).grid(row=0, column=0)
         ttk.Button(actions, text="Read Device", command=self._read_device).grid(row=0, column=1, padx=(8, 0))
         self.monitor_button = ttk.Button(actions, text="Start Monitor", command=self._toggle_monitor)
@@ -104,7 +121,7 @@ class WireGuardClient(tk.Tk):
         ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=3, padx=(14, 0), sticky="w")
 
         health = ttk.LabelFrame(root, text="Health", padding=12)
-        health.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(16, 0))
+        health.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         for col in range(4):
             health.columnconfigure(col, weight=1)
 
@@ -120,7 +137,7 @@ class WireGuardClient(tk.Tk):
         self._metric(health, 2, 1, "Last Error", self.last_error_var)
 
         log_frame = ttk.LabelFrame(root, text="Log", padding=8)
-        log_frame.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(16, 0))
+        log_frame.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(16, 0))
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log = tk.Text(log_frame, height=12, wrap="word", state="disabled")
@@ -160,6 +177,24 @@ class WireGuardClient(tk.Tk):
         value = self.port_var.get().strip()
         return value.split(" - ", 1)[0] if value else ""
 
+    def _connection_kwargs(self) -> dict[str, Any]:
+        if self.transport_var.get() == "tcp":
+            host = self.host_var.get().strip()
+            if not host:
+                raise ValueError("Enter a network host or IP address.")
+            try:
+                tcp_port = int(self.tcp_port_var.get().strip() or "4403")
+            except ValueError as exc:
+                raise ValueError("TCP port must be a number.") from exc
+            if tcp_port <= 0 or tcp_port > 65535:
+                raise ValueError("TCP port must be between 1 and 65535.")
+            return {"port": None, "host": host, "tcp_port": tcp_port}
+
+        port = self._selected_port()
+        if not port:
+            raise ValueError("Select a serial port.")
+        return {"port": port}
+
     def _run_worker(self, name: str, target: Callable[[], Any]) -> None:
         if self._busy:
             self._log("Another device operation is already running.")
@@ -176,31 +211,33 @@ class WireGuardClient(tk.Tk):
         threading.Thread(target=runner, daemon=True).start()
 
     def _push_config(self) -> None:
-        port = self._selected_port()
         config_path = self.config_path_var.get().strip()
-        if not port:
-            messagebox.showerror("Missing Port", "Select a serial port.")
-            return
         if not config_path:
             messagebox.showerror("Missing Config", "Select a WireGuard config file.")
+            return
+        try:
+            connection = self._connection_kwargs()
+        except ValueError as exc:
+            messagebox.showerror("Missing Connection", str(exc))
             return
 
         self._run_worker(
             "Pushing config...",
-            lambda: wg_api.set_wireguard_config(port, config_path, enable=True),
+            lambda: wg_api.set_wireguard_config(config_path=config_path, enable=True, **connection),
         )
         self._health["tx_bytes"] += Path(config_path).stat().st_size
         self._sync_health()
 
     def _read_device(self) -> None:
-        port = self._selected_port()
-        if not port:
-            messagebox.showerror("Missing Port", "Select a serial port.")
+        try:
+            connection = self._connection_kwargs()
+        except ValueError as exc:
+            messagebox.showerror("Missing Connection", str(exc))
             return
 
         self._health["tx_bytes"] += 64
         self._sync_health()
-        self._run_worker("Reading device...", lambda: wg_api.read_wireguard_config(port))
+        self._run_worker("Reading device...", lambda: wg_api.read_wireguard_config(**connection))
 
     def _toggle_monitor(self) -> None:
         self._monitoring = not self._monitoring
@@ -222,13 +259,14 @@ class WireGuardClient(tk.Tk):
         if self._busy:
             self._schedule_monitor()
             return
-        port = self._selected_port()
-        if not port:
+        try:
+            connection = self._connection_kwargs()
+        except ValueError:
             self._schedule_monitor()
             return
         self._health["tx_bytes"] += 64
         self._sync_health()
-        self._run_worker("Polling health...", lambda: wg_api.read_wireguard_config(port))
+        self._run_worker("Polling health...", lambda: wg_api.read_wireguard_config(**connection))
         self._schedule_monitor()
 
     def _drain_events(self) -> None:

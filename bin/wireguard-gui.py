@@ -20,7 +20,7 @@ from typing import Any, Callable
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
 CONFIG_SCRIPT = BUNDLE_DIR / "wireguard-config.py"
-APP_BUILD = "network3"
+APP_BUILD = "network4"
 
 
 def _load_config_api():
@@ -272,7 +272,7 @@ class WireGuardClient(tk.Tk):
                     self._events.put(("cancelled", (op_id, name)))
                     return
                 self._events.put(("result", (op_id, name, target(cancel_event, status, lambda iface: self._set_active_iface(op_id, iface)))))
-            except Exception as exc:
+            except BaseException as exc:
                 if cancel_event.is_set():
                     self._events.put(("cancelled", (op_id, name)))
                 else:

@@ -22,7 +22,7 @@ def list_serial_ports() -> list[dict[str, str]]:
     try:
         from serial.tools import list_ports
     except ModuleNotFoundError as exc:
-        raise SystemExit(
+        raise RuntimeError(
             "pyserial is required to list serial ports. Install meshtastic-python in your active Python environment first."
         ) from exc
 
@@ -43,7 +43,7 @@ def _import_meshtastic():
         from meshtastic.serial_interface import SerialInterface
         from meshtastic.tcp_interface import TCPInterface
     except ModuleNotFoundError as exc:
-        raise SystemExit(
+        raise RuntimeError(
             "meshtastic-python is required. Install it in your active Python environment first."
         ) from exc
     _patch_wireguard_module_config_copy(MeshInterface, mesh_pb2)
@@ -211,7 +211,6 @@ def _open_interface(
     cancel_event: CancelEvent | None = None,
     interface_callback: InterfaceCallback | None = None,
 ):
-    serial_interface, tcp_interface, _, _ = _import_meshtastic()
     if port and host:
         raise SystemExit("Use either --port for serial or --host for TCP, not both.")
     if host:
@@ -225,6 +224,12 @@ def _open_interface(
             cancel_event=cancel_event,
         )
         _progress(progress, f"TCP port reachable: {hostname}:{port_number}")
+        _progress(progress, "Loading Meshtastic API.")
+        try:
+            _, tcp_interface, _, _ = _import_meshtastic()
+        except BaseException:
+            sock.close()
+            raise
 
         iface = tcp_interface(
             hostname=hostname,
@@ -243,10 +248,14 @@ def _open_interface(
         _check_cancel(cancel_event)
         return iface
     if port:
+        _progress(progress, "Loading Meshtastic API.")
+        serial_interface, _, _, _ = _import_meshtastic()
         iface = serial_interface(devPath=port)
         if interface_callback:
             interface_callback(iface)
         return iface
+    _progress(progress, "Loading Meshtastic API.")
+    serial_interface, _, _, _ = _import_meshtastic()
     iface = serial_interface()
     if interface_callback:
         interface_callback(iface)
@@ -297,7 +306,7 @@ def _wireguard_config(node: Any):
     try:
         return node.moduleConfig.wireguard
     except AttributeError as exc:
-        raise SystemExit(
+        raise RuntimeError(
             "This meshtastic-python protobuf package does not include ModuleConfig.wireguard. "
             "Regenerate/install the Python protobufs from this firmware branch."
         ) from exc

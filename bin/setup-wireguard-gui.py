@@ -92,10 +92,15 @@ def _copy_transformed_protos(proto_dir: Path | None, proto_base_url: str) -> lis
         target = target_dir / proto_name
         target.write_text(text, encoding="utf-8")
         transformed.append(target.relative_to(WORK_PROTO_ROOT))
+
+    if proto_dir:
+        nanopb = proto_dir.parent / "nanopb.proto"
+        if nanopb.exists():
+            (WORK_PROTO_ROOT / "nanopb.proto").write_text(nanopb.read_text(encoding="utf-8"), encoding="utf-8")
     return transformed
 
 
-def _generate_branch_protobufs(python: Path, protos: list[Path]) -> None:
+def _generate_branch_protobufs(python: Path, protos: list[Path], proto_dir: Path | None) -> None:
     if GENERATED_ROOT.exists():
         shutil.rmtree(GENERATED_ROOT)
     GENERATED_ROOT.mkdir(parents=True)
@@ -108,6 +113,7 @@ def _generate_branch_protobufs(python: Path, protos: list[Path]) -> None:
         str(WORK_PROTO_ROOT),
         "-I",
         str(REPO_ROOT / "protobufs"),
+        *([] if not proto_dir else ["-I", str(proto_dir.parent)]),
         "--python_out",
         str(GENERATED_ROOT),
         *[str(proto).replace("\\", "/") for proto in protos],
@@ -142,7 +148,7 @@ def main() -> int:
     python = _create_venv(args.recreate)
     _install_dependencies(python)
     protos = _copy_transformed_protos(args.proto_dir, args.proto_base_url)
-    _generate_branch_protobufs(python, protos)
+    _generate_branch_protobufs(python, protos, args.proto_dir)
     _install_branch_protobufs(python)
 
     print()

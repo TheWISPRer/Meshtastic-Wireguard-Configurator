@@ -1,0 +1,8 @@
+.wireguard-gui-venv/
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

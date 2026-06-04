@@ -121,21 +121,48 @@ def _open_interface(
     host: str | None = None,
     tcp_port: int = 4403,
     timeout: int = 10,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+    interface_callback: InterfaceCallback | None = None,
 ):
     serial_interface, tcp_interface, _, _ = _import_meshtastic()
     if port and host:
         raise SystemExit("Use either --port for serial or --host for TCP, not both.")
     if host:
         hostname, port_number = _parse_tcp_target(host, tcp_port)
+        _check_cancel(cancel_event)
         try:
             with socket.create_connection((hostname, port_number), timeout=timeout):
                 pass
         except OSError as exc:
             raise RuntimeError(f"Unable to reach Meshtastic TCP API at {hostname}:{port_number}: {exc}") from exc
-        return tcp_interface(hostname=hostname, portNumber=port_number, timeout=timeout)
+        _progress(progress, f"TCP port reachable: {hostname}:{port_number}")
+
+        iface = tcp_interface(
+            hostname=hostname,
+            portNumber=port_number,
+            timeout=timeout,
+            noNodes=True,
+            connectNow=False,
+        )
+        if interface_callback:
+            interface_callback(iface)
+        _check_cancel(cancel_event)
+        _progress(progress, "Starting Meshtastic API handshake.")
+        iface.socket = socket.create_connection((hostname, port_number), timeout=timeout)
+        iface.connect()
+        iface.waitForConfig()
+        _check_cancel(cancel_event)
+        return iface
     if port:
-        return serial_interface(devPath=port)
-    return serial_interface()
+        iface = serial_interface(devPath=port)
+        if interface_callback:
+            interface_callback(iface)
+        return iface
+    iface = serial_interface()
+    if interface_callback:
+        interface_callback(iface)
+    return iface
 
 
 def _admin_message():
@@ -359,9 +386,15 @@ def read_wireguard_config(
     interface_callback: InterfaceCallback | None = None,
 ) -> dict[str, Any]:
     _progress(progress, "Opening device connection.")
-    iface = _open_interface(port, host=host, tcp_port=tcp_port, timeout=timeout)
-    if interface_callback:
-        interface_callback(iface)
+    iface = _open_interface(
+        port,
+        host=host,
+        tcp_port=tcp_port,
+        timeout=timeout,
+        progress=progress,
+        cancel_event=cancel_event,
+        interface_callback=interface_callback,
+    )
     try:
         _progress(progress, "Connected to device.")
         _refresh_wireguard_config(iface.localNode, progress=progress, cancel_event=cancel_event)
@@ -404,9 +437,15 @@ def set_wireguard_config(
     )
 
     _progress(progress, "Opening device connection.")
-    iface = _open_interface(port, host=host, tcp_port=tcp_port, timeout=timeout)
-    if interface_callback:
-        interface_callback(iface)
+    iface = _open_interface(
+        port,
+        host=host,
+        tcp_port=tcp_port,
+        timeout=timeout,
+        progress=progress,
+        cancel_event=cancel_event,
+        interface_callback=interface_callback,
+    )
     try:
         _progress(progress, "Connected to device.")
         node = iface.localNode

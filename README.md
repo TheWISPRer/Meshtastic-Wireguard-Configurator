@@ -102,6 +102,7 @@ Likely next additions:
 
 - UniFi import: connect to UniFi Network's API, list WireGuard VPN clients, and import a selected client config.
 - Batch deployment: load a CSV or JSON device list, apply one config per device, and export a success/failure report.
+- Fallback configuration: save the last confirmed working VPN config before remote writes and restore it if post-change verification fails.
 - Release automation: build and attach `MeshtasticWireGuardConfigurator.exe` to GitHub Releases from CI.
 
 ## Compatibility

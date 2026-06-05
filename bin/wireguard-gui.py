@@ -20,7 +20,7 @@ from typing import Any, Callable
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
 CONFIG_SCRIPT = BUNDLE_DIR / "wireguard-config.py"
-APP_BUILD = "network4"
+APP_BUILD = "network5"
 
 
 def _load_config_api():
@@ -49,9 +49,9 @@ class WireGuardClient(tk.Tk):
         self._operation_id = 0
         self._cancel_event: threading.Event | None = None
         self._active_iface: Any | None = None
+        self._last_success_at: float | None = None
         self._health = {
             "connected": False,
-            "heartbeat": "",
             "polls": 0,
             "failures": 0,
             "rx_bytes": 0,
@@ -76,7 +76,7 @@ class WireGuardClient(tk.Tk):
         self.endpoint_var = tk.StringVar(value="-")
         self.address_var = tk.StringVar(value="-")
         self.last_error_var = tk.StringVar(value="-")
-        self.heartbeat_var = tk.StringVar(value="-")
+        self.last_read_var = tk.StringVar(value="-")
         self.rx_var = tk.StringVar(value="0")
         self.tx_var = tk.StringVar(value="0")
         self.polls_var = tk.StringVar(value="0")
@@ -127,7 +127,8 @@ class WireGuardClient(tk.Tk):
         self.monitor_button.grid(row=0, column=2, padx=(8, 0))
         self.cancel_button = ttk.Button(actions, text="Cancel", command=self._cancel_operation, state="disabled")
         self.cancel_button.grid(row=0, column=3, padx=(8, 0))
-        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=4, padx=(14, 0), sticky="w")
+        ttk.Button(actions, text="Clear", command=self._clear_profile).grid(row=0, column=4, padx=(8, 0))
+        ttk.Label(actions, textvariable=self.status_var).grid(row=0, column=5, padx=(14, 0), sticky="w")
 
         health = ttk.LabelFrame(root, text="Health", padding=12)
         health.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(16, 0))
@@ -136,7 +137,7 @@ class WireGuardClient(tk.Tk):
 
         self._metric(health, 0, 0, "Connection", self.connection_var)
         self._metric(health, 0, 1, "WireGuard", self.wg_status_var)
-        self._metric(health, 0, 2, "Heartbeat", self.heartbeat_var)
+        self._metric(health, 0, 2, "Last Read", self.last_read_var)
         self._metric(health, 0, 3, "Failures", self.failures_var)
         self._metric(health, 1, 0, "Address", self.address_var)
         self._metric(health, 1, 1, "Endpoint", self.endpoint_var)
@@ -154,6 +155,7 @@ class WireGuardClient(tk.Tk):
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log.configure(yscrollcommand=scrollbar.set)
+        self.after(1000, self._tick_last_read)
 
     def _metric(self, parent: ttk.Frame, row: int, col: int, label: str, var: tk.StringVar) -> None:
         frame = ttk.Frame(parent)
@@ -185,6 +187,31 @@ class WireGuardClient(tk.Tk):
     def _selected_port(self) -> str:
         value = self.port_var.get().strip()
         return value.split(" - ", 1)[0] if value else ""
+
+    def _clear_health(self, *, reset_failures: bool = True) -> None:
+        self._last_success_at = None
+        self._health["connected"] = False
+        self._health["polls"] = 0
+        self._health["rx_bytes"] = 0
+        self._health["tx_bytes"] = 0
+        if reset_failures:
+            self._health["failures"] = 0
+        self.connection_var.set("Disconnected")
+        self.wg_status_var.set("-")
+        self.address_var.set("-")
+        self.endpoint_var.set("-")
+        self.last_error_var.set("-")
+        self._sync_health()
+
+    def _clear_profile(self) -> None:
+        if self._busy:
+            self._cancel_operation()
+        self.config_path_var.set("")
+        self.host_var.set("")
+        self.tcp_port_var.set("4403")
+        self.status_var.set("Idle")
+        self._clear_health()
+        self._log("Cleared current profile and status.")
 
     def _connection_kwargs(self) -> dict[str, Any]:
         if self.transport_var.get() == "tcp":
@@ -260,6 +287,7 @@ class WireGuardClient(tk.Tk):
         self._cancel_event = cancel_event
         self._active_iface = None
         self._busy = True
+        self._clear_health()
         self.status_var.set(name)
         self.cancel_button.configure(state="normal")
 
@@ -313,8 +341,6 @@ class WireGuardClient(tk.Tk):
             messagebox.showerror("Missing Connection", str(exc))
             return
 
-        self._health["tx_bytes"] += 64
-        self._sync_health()
         self._run_worker(
             "Reading device...",
             connection,
@@ -325,6 +351,8 @@ class WireGuardClient(tk.Tk):
                 **connection,
             ),
         )
+        self._health["tx_bytes"] += 64
+        self._sync_health()
 
     def _toggle_monitor(self) -> None:
         self._monitoring = not self._monitoring
@@ -351,8 +379,6 @@ class WireGuardClient(tk.Tk):
         except ValueError:
             self._schedule_monitor()
             return
-        self._health["tx_bytes"] += 64
-        self._sync_health()
         self._run_worker(
             "Polling health...",
             connection,
@@ -363,6 +389,8 @@ class WireGuardClient(tk.Tk):
                 **connection,
             ),
         )
+        self._health["tx_bytes"] += 64
+        self._sync_health()
         self._schedule_monitor()
 
     def _drain_events(self) -> None:
@@ -430,7 +458,7 @@ class WireGuardClient(tk.Tk):
     def _update_config_status(self, config: dict[str, Any]) -> None:
         self._health["connected"] = True
         self._health["polls"] += 1
-        self._health["heartbeat"] = time.strftime("%H:%M:%S")
+        self._last_success_at = time.monotonic()
         self._health["rx_bytes"] += len(json.dumps(config))
 
         self.connection_var.set("Connected")
@@ -443,11 +471,30 @@ class WireGuardClient(tk.Tk):
         self._sync_health()
 
     def _sync_health(self) -> None:
-        self.heartbeat_var.set(self._health["heartbeat"] or "-")
+        self.last_read_var.set(self._format_last_read())
         self.rx_var.set(str(self._health["rx_bytes"]))
         self.tx_var.set(str(self._health["tx_bytes"]))
         self.polls_var.set(str(self._health["polls"]))
         self.failures_var.set(str(self._health["failures"]))
+
+    def _format_last_read(self) -> str:
+        if self._last_success_at is None:
+            return "-"
+        age = max(0, int(time.monotonic() - self._last_success_at))
+        if age < 2:
+            return "just now"
+        if age < 60:
+            return f"{age}s ago"
+        minutes = age // 60
+        if minutes < 60:
+            return f"{minutes}m ago"
+        hours = minutes // 60
+        minutes = minutes % 60
+        return f"{hours}h {minutes}m ago"
+
+    def _tick_last_read(self) -> None:
+        self.last_read_var.set(self._format_last_read())
+        self.after(1000, self._tick_last_read)
 
     def _log_json(self, title: str, payload: Any) -> None:
         self._log(f"{title}:\n{json.dumps(payload, indent=2)}")

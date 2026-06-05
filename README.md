@@ -109,6 +109,20 @@ Likely next additions:
 
 `bin\setup-wireguard-gui.py` downloads the Meshtastic protobuf sources from the experimental WireGuard firmware branch, generates Python bindings, and overlays them into the local Python environment so the configurator can use `ModuleConfig.wireguard` before upstream Meshtastic clients support it natively.
 
+The default setup profile targets the current experimental WireGuard branch. For trial firmware based on Meshtastic 2.8 development protos, rebuild the local environment with:
+
+```powershell
+python bin\setup-wireguard-gui.py --recreate --proto-profile 2.8-wireguard-trial
+```
+
+To test against a local 2.8 firmware checkout, pass both the profile and local protobuf directory:
+
+```powershell
+python bin\setup-wireguard-gui.py --recreate --proto-profile 2.8-wireguard-trial --proto-dir C:\path\to\Meshtastic\protobufs\meshtastic
+```
+
+During each device read or push, the configurator asks the device for metadata first. Firmware versions `2.8.0` and newer are labeled with the `2.8-wireguard-trial` protobuf profile in CLI output and the GUI health panel.
+
 To use a local protobuf checkout instead of downloading:
 
 ```powershell

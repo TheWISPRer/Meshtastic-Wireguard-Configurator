@@ -7,6 +7,7 @@ import argparse
 import configparser
 import errno
 import json
+import re
 import select
 import socket
 import sys
@@ -105,6 +106,9 @@ def _parse_tcp_target(host: str, tcp_port: int) -> tuple[str, int]:
 ProgressCallback = Callable[[str], None]
 CancelEvent = Any
 InterfaceCallback = Callable[[Any], None]
+UNKNOWN_PROTO_PROFILE = "unknown"
+DEFAULT_PROTO_PROFILE = "wireguard"
+V28_PROTO_PROFILE = "2.8-wireguard-trial"
 
 
 def _check_cancel(cancel_event: CancelEvent | None) -> None:
@@ -115,6 +119,26 @@ def _check_cancel(cancel_event: CancelEvent | None) -> None:
 def _progress(progress: ProgressCallback | None, message: str) -> None:
     if progress:
         progress(message)
+
+
+def _parse_version(value: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", value)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def _proto_profile_for_firmware(firmware_version: str) -> str:
+    parsed = _parse_version(firmware_version)
+    if parsed is None:
+        return UNKNOWN_PROTO_PROFILE
+    if parsed >= (2, 8, 0):
+        return V28_PROTO_PROFILE
+    return DEFAULT_PROTO_PROFILE
+
+
+def _module_config_type_name(profile: str) -> str:
+    return "WIREGUARD_CONFIG"
 
 
 def _connect_tcp_socket(
@@ -276,13 +300,14 @@ def _refresh_wireguard_config(
     node: Any,
     delay: float = 5.0,
     *,
+    profile: str = DEFAULT_PROTO_PROFILE,
     progress: ProgressCallback | None = None,
     cancel_event: CancelEvent | None = None,
 ) -> None:
     _check_cancel(cancel_event)
     config = _wireguard_config(node)
     admin = _admin_message()
-    admin.get_module_config_request = admin.ModuleConfigType.Value("WIREGUARD_CONFIG")
+    admin.get_module_config_request = admin.ModuleConfigType.Value(_module_config_type_name(profile))
     received = Event()
 
     def on_response(packet: dict[str, Any]) -> None:
@@ -300,6 +325,49 @@ def _refresh_wireguard_config(
         raise TimeoutError("Timed out waiting for WireGuard config response.")
     _check_cancel(cancel_event)
     _progress(progress, "Confirmed device response.")
+
+
+def _read_device_metadata(
+    node: Any,
+    delay: float = 5.0,
+    *,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+) -> dict[str, str]:
+    _check_cancel(cancel_event)
+    admin = _admin_message()
+    admin.get_device_metadata_request = True
+    metadata: dict[str, str] = {}
+    received = Event()
+
+    def on_response(packet: dict[str, Any]) -> None:
+        try:
+            raw_admin = packet["decoded"]["admin"]["raw"]
+            response = raw_admin.get_device_metadata_response
+            metadata["firmware_version"] = getattr(response, "firmware_version", "")
+        finally:
+            received.set()
+
+    _progress(progress, "Sent device metadata request.")
+    node._sendAdmin(admin, wantResponse=True, onResponse=on_response)
+    _progress(progress, "Waiting for device metadata.")
+    if not received.wait(delay):
+        _check_cancel(cancel_event)
+        _progress(progress, "Device metadata request timed out; using legacy protobuf profile.")
+        return {"firmware_version": "", "protobuf_profile": DEFAULT_PROTO_PROFILE}
+    _check_cancel(cancel_event)
+    firmware_version = metadata.get("firmware_version", "")
+    profile = _proto_profile_for_firmware(firmware_version)
+    if profile == V28_PROTO_PROFILE:
+        _progress(progress, f"Detected Meshtastic {firmware_version}; using 2.8 WireGuard protobuf profile.")
+    elif profile == DEFAULT_PROTO_PROFILE:
+        _progress(progress, f"Detected Meshtastic {firmware_version}; using legacy WireGuard protobuf profile.")
+    else:
+        _progress(progress, "Unable to parse Meshtastic firmware version; using installed protobuf profile.")
+    return {
+        "firmware_version": firmware_version,
+        "protobuf_profile": profile if profile != UNKNOWN_PROTO_PROFILE else DEFAULT_PROTO_PROFILE,
+    }
 
 
 def _wireguard_config(node: Any):
@@ -328,8 +396,8 @@ def _redact(value: str, show_secrets: bool) -> str:
     return SECRET
 
 
-def _to_dict(config: Any, show_secrets: bool = False) -> dict[str, Any]:
-    return {
+def _to_dict(config: Any, show_secrets: bool = False, metadata: dict[str, str] | None = None) -> dict[str, Any]:
+    data = {
         "enabled": bool(config.enabled),
         "address": config.address,
         "server_addr": config.server_addr,
@@ -340,6 +408,9 @@ def _to_dict(config: Any, show_secrets: bool = False) -> dict[str, Any]:
         "status": _enum_name(int(getattr(config, "status", 0))),
         "last_error": getattr(config, "last_error", ""),
     }
+    if metadata:
+        data.update(metadata)
+    return data
 
 
 def _set_if_present(config: Any, field: str, value: Any) -> None:
@@ -494,8 +565,14 @@ def read_wireguard_config(
     )
     try:
         _progress(progress, "Connected to device.")
-        _refresh_wireguard_config(iface.localNode, progress=progress, cancel_event=cancel_event)
-        return _to_dict(_wireguard_config(iface.localNode), show_secrets)
+        metadata = _read_device_metadata(iface.localNode, progress=progress, cancel_event=cancel_event)
+        _refresh_wireguard_config(
+            iface.localNode,
+            profile=metadata.get("protobuf_profile", DEFAULT_PROTO_PROFILE),
+            progress=progress,
+            cancel_event=cancel_event,
+        )
+        return _to_dict(_wireguard_config(iface.localNode), show_secrets, metadata)
     finally:
         iface.close()
 
@@ -546,13 +623,14 @@ def set_wireguard_config(
     try:
         _progress(progress, "Connected to device.")
         node = iface.localNode
+        metadata = _read_device_metadata(node, progress=progress, cancel_event=cancel_event)
         written = _write_config(node, _wireguard_config(node), args, progress=progress, cancel_event=cancel_event)
     finally:
         iface.close()
 
     _progress(progress, "Reading back saved config.")
     return {
-        "written": _to_dict(written, show_secrets),
+        "written": _to_dict(written, show_secrets, metadata),
         "confirmed": read_wireguard_config(
             port,
             show_secrets,

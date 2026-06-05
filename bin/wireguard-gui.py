@@ -20,7 +20,7 @@ from typing import Any, Callable
 SCRIPT_DIR = Path(__file__).resolve().parent
 BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
 CONFIG_SCRIPT = BUNDLE_DIR / "wireguard-config.py"
-APP_BUILD = "network5"
+APP_BUILD = "proto28trial2"
 
 
 def _load_config_api():
@@ -73,6 +73,8 @@ class WireGuardClient(tk.Tk):
         self.status_var = tk.StringVar(value="Idle")
         self.connection_var = tk.StringVar(value="Disconnected")
         self.wg_status_var = tk.StringVar(value="-")
+        self.firmware_var = tk.StringVar(value="-")
+        self.proto_profile_var = tk.StringVar(value="-")
         self.endpoint_var = tk.StringVar(value="-")
         self.address_var = tk.StringVar(value="-")
         self.last_error_var = tk.StringVar(value="-")
@@ -145,6 +147,8 @@ class WireGuardClient(tk.Tk):
         self._metric(health, 1, 3, "TX bytes est.", self.tx_var)
         self._metric(health, 2, 0, "Polls", self.polls_var)
         self._metric(health, 2, 1, "Last Error", self.last_error_var)
+        self._metric(health, 2, 2, "Firmware", self.firmware_var)
+        self._metric(health, 2, 3, "Proto Profile", self.proto_profile_var)
 
         log_frame = ttk.LabelFrame(root, text="Log", padding=8)
         log_frame.grid(row=6, column=0, columnspan=2, sticky="nsew", pady=(16, 0))
@@ -198,6 +202,8 @@ class WireGuardClient(tk.Tk):
             self._health["failures"] = 0
         self.connection_var.set("Disconnected")
         self.wg_status_var.set("-")
+        self.firmware_var.set("-")
+        self.proto_profile_var.set("-")
         self.address_var.set("-")
         self.endpoint_var.set("-")
         self.last_error_var.set("-")
@@ -463,6 +469,8 @@ class WireGuardClient(tk.Tk):
 
         self.connection_var.set("Connected")
         self.wg_status_var.set(str(config.get("status", "-")))
+        self.firmware_var.set(str(config.get("firmware_version", "-") or "-"))
+        self.proto_profile_var.set(str(config.get("protobuf_profile", "-") or "-"))
         self.address_var.set(str(config.get("address", "-")) or "-")
         server = str(config.get("server_addr", "") or "")
         port = str(config.get("server_port", "") or "")

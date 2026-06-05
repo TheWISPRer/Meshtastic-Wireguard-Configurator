@@ -56,6 +56,8 @@ def main() -> int:
             "--hidden-import",
             "meshtastic.serial_interface",
             "--hidden-import",
+            "meshtastic.tcp_interface",
+            "--hidden-import",
             "serial.tools.list_ports",
             str(GUI_SCRIPT),
         ]

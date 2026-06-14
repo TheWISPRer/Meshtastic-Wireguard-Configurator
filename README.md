@@ -118,10 +118,11 @@ When configuring over the network, the app pings the selected host before openin
 
 Likely next additions:
 
-- Batch deployment: load a CSV or JSON device list, apply one config per device, and export a success/failure report.
+- Batch/Fleet deployment and maintenance: load a CSV or JSON device list, apply one config per device, and export a success/failure report.
 - Fallback configuration: save the last confirmed working VPN config before remote writes and restore it if post-change verification fails.
 - Release automation: build and attach `MeshtasticWireGuardConfigurator.exe` to GitHub Releases from CI.
 - Full self-update flow: download, verify, replace the running EXE through a helper process, and restart.
+- Firmware Maintenance to support flashing and updating WireGuard-capable firmware on verified ESP and Linux based nodes (compatible with Batch mode and ability to inject custom Linux patches)
 
 For any future batch deployment workflow, each node must receive its own unique WireGuard client configuration. Reusing the same WireGuard private key or tunnel address across multiple nodes will cause routing and identity conflicts.
 

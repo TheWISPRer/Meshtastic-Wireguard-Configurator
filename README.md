@@ -4,6 +4,9 @@ Simple Windows-friendly configurator for experimental Meshtastic firmware builds
 
 This tool lets users import a standard single-peer WireGuard `.conf`, connect over serial or the Meshtastic TCP API, push the config to a device, confirm readback, tune basic network settings, and monitor basic tunnel health from a dark ZoomNet-branded GUI.
 
+<img width="970" height="715" alt="image" src="https://github.com/user-attachments/assets/d69e2c58-bac6-42a3-9d71-9a0296cffd8d" />
+
+
 ## Quick Start
 
 1. Install Python 3 for Windows.

@@ -24,6 +24,8 @@ In the GUI, choose `Serial` for USB-connected devices or `Network` for devices r
 
 The GUI shows progress for each device operation, including network ping status, connection open, request sent, waiting for response, and confirmed response. Use `Cancel` if a device operation is stuck or the wrong IP/port was entered; the app will ignore late results from the cancelled operation and allow a new action. The detailed log is collapsed by default and can be expanded when troubleshooting.
 
+The `WireGuard` section keeps device actions at the top, followed by the selected `.conf` file and device health. Each node should use a unique WireGuard client config; do not reuse the same private key or tunnel address across multiple devices.
+
 The `Network` section can read and apply common Meshtastic network settings:
 
 - Wi-Fi enabled state, SSID, and password

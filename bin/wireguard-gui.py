@@ -27,8 +27,8 @@ BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", SCRIPT_DIR))
 CONFIG_SCRIPT = BUNDLE_DIR / "wireguard-config.py"
 ASSET_DIR = BUNDLE_DIR / "assets" if (BUNDLE_DIR / "assets").exists() else SCRIPT_DIR.parent / "assets"
 LOGO_PATH = ASSET_DIR / "zoomnet-logo.png"
-APP_VERSION = "0.4.0"
-APP_BUILD = "networktab4"
+APP_VERSION = "0.5.0"
+APP_BUILD = "networktab9"
 RELEASES_API_URL = "https://api.github.com/repos/TheWISPRer/Meshtastic-Wireguard-Configurator/releases/latest"
 HTTP_TIMEOUT_SECONDS = 8
 DOWNLOAD_TIMEOUT_SECONDS = 60
@@ -44,6 +44,17 @@ COLOR_TEXT = "#edf7fb"
 COLOR_MUTED = "#8aa8b7"
 COLOR_DANGER = "#f25f5c"
 
+BLUETOOTH_MODE_TO_VALUE = {
+    "Random PIN": 0,
+    "Fixed PIN": 1,
+    "No PIN": 2,
+}
+BLUETOOTH_VALUE_TO_MODE = {value: label for label, value in BLUETOOTH_MODE_TO_VALUE.items()}
+ADDRESS_MODE_TO_TEXT = {
+    0: "DHCP",
+    1: "Static",
+}
+
 
 def _load_config_api():
     spec = importlib.util.spec_from_file_location("wireguard_config", CONFIG_SCRIPT)
@@ -55,6 +66,44 @@ def _load_config_api():
 
 
 wg_api = _load_config_api()
+
+
+class Tooltip:
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self._tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _show(self, _event: tk.Event) -> None:
+        if self._tip is not None:
+            return
+        x = self.widget.winfo_rootx() + 18
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        self._tip = tk.Toplevel(self.widget)
+        self._tip.wm_overrideredirect(True)
+        self._tip.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            self._tip,
+            text=self.text,
+            justify="left",
+            bg="#102334",
+            fg=COLOR_TEXT,
+            relief="solid",
+            bd=1,
+            padx=10,
+            pady=7,
+            wraplength=360,
+            font=("Segoe UI", 9),
+        )
+        label.pack()
+
+    def _hide(self, _event: tk.Event | None = None) -> None:
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
 
 
 class WireGuardClient(tk.Tk):
@@ -77,6 +126,12 @@ class WireGuardClient(tk.Tk):
         self._logo_image: tk.PhotoImage | None = None
         self._icon_image: tk.PhotoImage | None = None
         self._log_visible = False
+        self.network_log_toggle_button: ttk.Button | None = None
+        self.bluetooth_disable_wifi_check: ttk.Checkbutton | None = None
+        self.wireguard_page_shell: ttk.Frame | None = None
+        self.network_page_shell: ttk.Frame | None = None
+        self.log_frames: list[ttk.Frame] = []
+        self.log_widgets: list[tk.Text] = []
         self._last_success_at: float | None = None
         self._health = {
             "connected": False,
@@ -88,6 +143,8 @@ class WireGuardClient(tk.Tk):
 
         self._build_vars()
         self._build_ui()
+        self.transport_var.trace_add("write", lambda *_args: self._sync_transport_dependent_controls())
+        self._sync_transport_dependent_controls()
         self._log(f"App version {APP_VERSION} build {APP_BUILD}.")
         self._refresh_ports()
         self.after(100, self._drain_events)
@@ -114,12 +171,16 @@ class WireGuardClient(tk.Tk):
         self.failures_var = tk.StringVar(value="0")
         self.update_notice_var = tk.StringVar(value="")
         self.network_wifi_enabled_var = tk.BooleanVar(value=False)
+        self.network_wifi_disable_bluetooth_var = tk.BooleanVar(value=False)
         self.network_wifi_ssid_var = tk.StringVar()
         self.network_wifi_psk_var = tk.StringVar()
         self.network_ntp_server_var = tk.StringVar()
         self.network_eth_enabled_var = tk.BooleanVar(value=False)
         self.network_ipv6_enabled_var = tk.BooleanVar(value=False)
         self.network_bluetooth_enabled_var = tk.BooleanVar(value=False)
+        self.network_bluetooth_disable_wifi_var = tk.BooleanVar(value=False)
+        self.network_bluetooth_mode_var = tk.StringVar(value="Random PIN")
+        self.network_bluetooth_pin_var = tk.StringVar()
         self.network_rsyslog_server_var = tk.StringVar()
         self.network_address_mode_var = tk.StringVar(value="-")
         self.network_firmware_var = tk.StringVar(value="-")
@@ -134,7 +195,7 @@ class WireGuardClient(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(5, weight=0)
+        root.rowconfigure(4, weight=1)
         self.after(50, self._apply_window_chrome)
         self.after(500, self._apply_window_chrome)
         self.bind("<Map>", lambda _event: self.after(50, self._apply_window_chrome), add="+")
@@ -200,13 +261,11 @@ class WireGuardClient(tk.Tk):
         self.page_container = ttk.Frame(root, style="App.TFrame")
         self.page_container.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
         self.page_container.columnconfigure(0, weight=1)
-        self.wireguard_page = ttk.Frame(self.page_container, style="App.TFrame")
-        self.network_page = ttk.Frame(self.page_container, style="App.TFrame")
-        for page in (self.wireguard_page, self.network_page):
-            page.grid(row=0, column=0, sticky="nsew")
-            page.columnconfigure(0, weight=1)
+        self.page_container.rowconfigure(0, weight=1)
+        self.wireguard_page_shell, wireguard_actions, self.wireguard_page = self._scrollable_page(self.page_container)
+        self.network_page_shell, network_actions, self.network_page = self._scrollable_page(self.page_container)
 
-        actions = ttk.Frame(self.wireguard_page)
+        actions = ttk.Frame(wireguard_actions)
         actions.configure(style="App.TFrame")
         actions.grid(row=0, column=0, sticky="ew")
         ttk.Button(actions, text="Push Config", command=self._push_config, style="Accent.TButton").grid(row=0, column=0)
@@ -220,9 +279,9 @@ class WireGuardClient(tk.Tk):
         self.log_toggle_button.grid(row=0, column=5, padx=(8, 0))
         ttk.Label(actions, textvariable=self.status_var, style="Status.TLabel").grid(row=0, column=6, padx=(14, 0), sticky="w")
 
-        ttk.Label(self.wireguard_page, textvariable=self.wg_note_var, style="Hint.TLabel").grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(self.wireguard_page, textvariable=self.wg_note_var, style="Hint.TLabel").grid(row=0, column=0, sticky="ew")
 
-        _, wg_config = self._section(self.wireguard_page, "WireGuard Config", row=2)
+        _, wg_config = self._section(self.wireguard_page, "WireGuard Config", row=1)
         wg_config.columnconfigure(1, weight=1)
         ttk.Label(wg_config, text="Config File", style="FieldLabel.TLabel").grid(row=0, column=0, sticky="w")
         config_row = ttk.Frame(wg_config, style="Card.TFrame")
@@ -231,7 +290,7 @@ class WireGuardClient(tk.Tk):
         ttk.Entry(config_row, textvariable=self.config_path_var).grid(row=0, column=0, sticky="ew")
         ttk.Button(config_row, text="Browse", command=self._browse_config, style="Ghost.TButton").grid(row=0, column=1, padx=(8, 0))
 
-        _, health = self._section(self.wireguard_page, "Health", row=3)
+        _, health = self._section(self.wireguard_page, "Health", row=2)
         for col in range(6):
             health.columnconfigure(col, weight=1)
 
@@ -247,14 +306,80 @@ class WireGuardClient(tk.Tk):
         self._metric(health, 1, 3, "Last Error", self.last_error_var)
         self._metric(health, 1, 4, "Firmware", self.firmware_var)
         self._metric(health, 1, 5, "Proto Profile", self.proto_profile_var)
+        self._create_log_section(self.wireguard_page, row=3)
 
-        self._build_network_page(self.network_page)
+        self._build_network_page(network_actions, self.network_page)
         self._show_page("wireguard")
+        self.after(1000, self._tick_last_read)
 
-        self.log_frame, log_body = self._section(root, "Log", row=5, sticky="nsew", pady=(12, 0), body_padding=(0, 0))
-        self.log_frame.grid(row=5, column=0, sticky="nsew", pady=(12, 0))
+    def _show_page(self, page: str) -> None:
+        if page == "network":
+            if self.wireguard_page_shell is not None:
+                self.wireguard_page_shell.grid_remove()
+            if self.network_page_shell is not None:
+                self.network_page_shell.grid(row=0, column=0, sticky="nsew")
+            self.network_nav_button.configure(style="NavActive.TButton")
+            self.wireguard_nav_button.configure(style="Nav.TButton")
+            self.status_var.set(self.network_status_var.get())
+        else:
+            if self.network_page_shell is not None:
+                self.network_page_shell.grid_remove()
+            if self.wireguard_page_shell is not None:
+                self.wireguard_page_shell.grid(row=0, column=0, sticky="nsew")
+            self.wireguard_nav_button.configure(style="NavActive.TButton")
+            self.network_nav_button.configure(style="Nav.TButton")
+
+    def _scrollable_page(self, parent: ttk.Frame) -> tuple[ttk.Frame, ttk.Frame, ttk.Frame]:
+        shell = ttk.Frame(parent, style="App.TFrame")
+        shell.grid(row=0, column=0, sticky="nsew")
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(1, weight=1)
+
+        actions = ttk.Frame(shell, style="App.TFrame")
+        actions.grid(row=0, column=0, columnspan=2, sticky="ew")
+        actions.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(shell, bg=COLOR_BG, highlightthickness=0, bd=0)
+        canvas.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        scrollbar = ttk.Scrollbar(shell, orient="vertical", command=canvas.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns", pady=(12, 0))
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        body = ttk.Frame(canvas, style="App.TFrame")
+        window_id = canvas.create_window((0, 0), window=body, anchor="nw")
+        body.columnconfigure(0, weight=1)
+
+        def sync_scrollbar() -> None:
+            overflow = body.winfo_reqheight() > canvas.winfo_height() + 1
+            if overflow:
+                if not scrollbar.winfo_ismapped():
+                    scrollbar.grid(row=1, column=1, sticky="ns", pady=(12, 0))
+            else:
+                if scrollbar.winfo_ismapped():
+                    scrollbar.grid_remove()
+                canvas.yview_moveto(0)
+
+        def update_scrollregion(_event: tk.Event | None = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            sync_scrollbar()
+
+        def update_width(event: tk.Event) -> None:
+            canvas.itemconfigure(window_id, width=event.width)
+            sync_scrollbar()
+
+        def on_mousewheel(event: tk.Event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        body.bind("<Configure>", update_scrollregion, add="+")
+        canvas.bind("<Configure>", update_width, add="+")
+        canvas.bind("<Enter>", lambda _event: canvas.bind_all("<MouseWheel>", on_mousewheel), add="+")
+        canvas.bind("<Leave>", lambda _event: canvas.unbind_all("<MouseWheel>"), add="+")
+        return shell, actions, body
+
+    def _create_log_section(self, parent: ttk.Frame, *, row: int) -> None:
+        log_frame, log_body = self._section(parent, "Log", row=row, sticky="ew", pady=(12, 0), body_padding=(0, 0))
         log_body.rowconfigure(0, weight=1)
-        self.log = tk.Text(
+        log = tk.Text(
             log_body,
             height=12,
             wrap="word",
@@ -267,23 +392,13 @@ class WireGuardClient(tk.Tk):
             padx=10,
             pady=8,
         )
-        self.log.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(log_body, orient="vertical", command=self.log.yview)
+        log.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(log_body, orient="vertical", command=log.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
-        self.log.configure(yscrollcommand=scrollbar.set)
-        self.log_frame.grid_remove()
-        self.after(1000, self._tick_last_read)
-
-    def _show_page(self, page: str) -> None:
-        if page == "network":
-            self.network_page.tkraise()
-            self.network_nav_button.configure(style="NavActive.TButton")
-            self.wireguard_nav_button.configure(style="Nav.TButton")
-            self.status_var.set(self.network_status_var.get())
-        else:
-            self.wireguard_page.tkraise()
-            self.wireguard_nav_button.configure(style="NavActive.TButton")
-            self.network_nav_button.configure(style="Nav.TButton")
+        log.configure(yscrollcommand=scrollbar.set)
+        log_frame.grid_remove()
+        self.log_frames.append(log_frame)
+        self.log_widgets.append(log)
 
     def _section(
         self,
@@ -306,23 +421,38 @@ class WireGuardClient(tk.Tk):
         body.columnconfigure(0, weight=1)
         return outer, body
 
-    def _build_network_page(self, parent: ttk.Frame) -> None:
-        actions = ttk.Frame(parent, style="App.TFrame")
+    def _build_network_page(self, actions_parent: ttk.Frame, parent: ttk.Frame) -> None:
+        actions = ttk.Frame(actions_parent, style="App.TFrame")
         actions.grid(row=0, column=0, sticky="ew")
         ttk.Button(actions, text="Read Network", command=self._read_network_config, style="Accent.TButton").grid(row=0, column=0)
         ttk.Button(actions, text="Apply Network", command=self._apply_network_config, style="Ghost.TButton").grid(row=0, column=1, padx=(8, 0))
         ttk.Button(actions, text="Clear Fields", command=self._clear_network_fields, style="Ghost.TButton").grid(row=0, column=2, padx=(8, 0))
-        ttk.Label(actions, textvariable=self.network_status_var, style="Status.TLabel").grid(row=0, column=3, padx=(14, 0), sticky="w")
+        self.network_log_toggle_button = ttk.Button(actions, text="Show Log", command=self._toggle_log, style="Ghost.TButton")
+        self.network_log_toggle_button.grid(row=0, column=3, padx=(8, 0))
+        ttk.Label(actions, textvariable=self.network_status_var, style="Status.TLabel").grid(row=0, column=4, padx=(14, 0), sticky="w")
 
         ttk.Label(
             parent,
             text="Network writes can interrupt the active management path. Read first, apply one device at a time, then confirm after reconnect.",
             style="Hint.TLabel",
-        ).grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        ).grid(row=0, column=0, sticky="ew")
 
-        _, wifi = self._section(parent, "Wi-Fi", row=2)
+        _, wifi = self._section(parent, "Wi-Fi", row=1)
         wifi.columnconfigure(1, weight=1)
         ttk.Checkbutton(wifi, text="Enable Wi-Fi", variable=self.network_wifi_enabled_var).grid(row=0, column=0, sticky="w")
+        wifi_disable_bluetooth = ttk.Checkbutton(
+            wifi,
+            text="Automatically disable Bluetooth prior to enabling Wi-Fi",
+            variable=self.network_wifi_disable_bluetooth_var,
+            command=self._confirm_wifi_disable_bluetooth,
+        )
+        wifi_disable_bluetooth.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        Tooltip(
+            wifi_disable_bluetooth,
+            "Some ESP-based devices cannot use Wi-Fi and Bluetooth at the same time. "
+            "When enabling Wi-Fi remotely, leave this checked if Bluetooth is currently on; "
+            "otherwise Wi-Fi startup may fail or the remote connection may drop unexpectedly.",
+        )
         ttk.Label(wifi, text="SSID", style="FieldLabel.TLabel").grid(row=1, column=0, sticky="w", pady=(12, 0))
         ttk.Entry(wifi, textvariable=self.network_wifi_ssid_var).grid(row=1, column=1, sticky="ew", padx=(12, 0), pady=(12, 0))
         ttk.Label(wifi, text="Password", style="FieldLabel.TLabel").grid(row=2, column=0, sticky="w", pady=(12, 0))
@@ -334,17 +464,36 @@ class WireGuardClient(tk.Tk):
             sticky="ew",
             pady=(8, 0),
         )
-        ttk.Checkbutton(wifi, text="Enable Bluetooth", variable=self.network_bluetooth_enabled_var).grid(
-            row=4,
-            column=0,
-            sticky="w",
-            pady=(12, 0),
+
+        _, bluetooth = self._section(parent, "Bluetooth", row=2)
+        bluetooth.columnconfigure(1, weight=1)
+        bluetooth.columnconfigure(3, weight=1)
+        ttk.Checkbutton(bluetooth, text="Enable Bluetooth", variable=self.network_bluetooth_enabled_var).grid(row=0, column=0, sticky="w")
+        self.bluetooth_disable_wifi_check = ttk.Checkbutton(
+            bluetooth,
+            text="Automatically disable Wi-Fi prior to enabling Bluetooth",
+            variable=self.network_bluetooth_disable_wifi_var,
+            command=self._confirm_bluetooth_disable_wifi,
         )
+        self.bluetooth_disable_wifi_check.grid(row=0, column=1, columnspan=3, sticky="w", padx=(12, 0))
+        Tooltip(
+            self.bluetooth_disable_wifi_check,
+            "Disabled when the configurator is using Network/TCP. Turning Wi-Fi off first would break the current network path before Bluetooth can be confirmed. Enable Bluetooth first, then manually disable Wi-Fi after reconnecting through another path if needed.",
+        )
+        ttk.Label(bluetooth, text="Pairing Mode", style="FieldLabel.TLabel").grid(row=1, column=0, sticky="w", pady=(12, 0))
+        ttk.Combobox(
+            bluetooth,
+            textvariable=self.network_bluetooth_mode_var,
+            values=list(BLUETOOTH_MODE_TO_VALUE.keys()),
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew", padx=(12, 18), pady=(12, 0))
+        ttk.Label(bluetooth, text="Fixed PIN", style="FieldLabel.TLabel").grid(row=1, column=2, sticky="w", pady=(12, 0))
+        ttk.Entry(bluetooth, textvariable=self.network_bluetooth_pin_var, width=12).grid(row=1, column=3, sticky="ew", padx=(12, 0), pady=(12, 0))
         ttk.Label(
-            wifi,
-            text="Turn Bluetooth off before enabling Wi-Fi on devices that cannot run both reliably.",
+            bluetooth,
+            text="Use Fixed PIN mode when setting a specific PIN. Leave PIN as 0 to preserve the device default.",
             style="CardHint.TLabel",
-        ).grid(row=4, column=1, sticky="ew", padx=(12, 0), pady=(12, 0))
+        ).grid(row=2, column=0, columnspan=4, sticky="ew", pady=(8, 0))
 
         _, services = self._section(parent, "Services", row=3)
         services.columnconfigure(1, weight=1)
@@ -359,6 +508,7 @@ class WireGuardClient(tk.Tk):
         ttk.Label(services, textvariable=self.network_address_mode_var, style="MetricValue.TLabel").grid(row=2, column=1, sticky="w", pady=(12, 0))
         ttk.Label(services, text="Firmware", style="FieldLabel.TLabel").grid(row=2, column=2, sticky="w", pady=(12, 0))
         ttk.Label(services, textvariable=self.network_firmware_var, style="MetricValue.TLabel").grid(row=2, column=3, sticky="w", pady=(12, 0))
+        self._create_log_section(parent, row=4)
 
     def _metric(self, parent: ttk.Frame, row: int, col: int, label: str, var: tk.StringVar) -> None:
         frame = ttk.Frame(parent, padding=(8, 6), style="Metric.TFrame")
@@ -376,6 +526,7 @@ class WireGuardClient(tk.Tk):
         style.configure("App.TFrame", background=COLOR_BG)
         style.configure("Card.TFrame", background=COLOR_PANEL)
         style.configure("Section.TFrame", background=COLOR_PANEL, bordercolor=COLOR_ACCENT_SOFT, relief="flat")
+        style.configure("Dialog.TFrame", background=COLOR_PANEL_2, bordercolor=COLOR_ACCENT_SOFT, relief="flat")
         style.configure("Header.TFrame", background=COLOR_PANEL, relief="flat")
         style.configure("Update.TFrame", background="#102d3b")
         style.configure("Metric.TFrame", background=COLOR_PANEL, relief="flat")
@@ -386,6 +537,8 @@ class WireGuardClient(tk.Tk):
         style.configure("Muted.TLabel", background=COLOR_PANEL, foreground=COLOR_MUTED)
         style.configure("FieldLabel.TLabel", background=COLOR_PANEL, foreground=COLOR_MUTED, font=("Segoe UI", 9, "bold"))
         style.configure("SectionTitle.TLabel", background=COLOR_PANEL, foreground=COLOR_ACCENT, font=("Segoe UI", 10, "bold"))
+        style.configure("DialogTitle.TLabel", background=COLOR_PANEL_2, foreground=COLOR_ACCENT, font=("Segoe UI", 13, "bold"))
+        style.configure("DialogBody.TLabel", background=COLOR_PANEL_2, foreground=COLOR_TEXT, font=("Segoe UI", 10))
         style.configure("Status.TLabel", background=COLOR_BG, foreground=COLOR_ACCENT, font=("Segoe UI", 10, "bold"))
         style.configure("Hint.TLabel", background=COLOR_BG, foreground=COLOR_MUTED, font=("Segoe UI", 9))
         style.configure("CardHint.TLabel", background=COLOR_PANEL, foreground=COLOR_MUTED, font=("Segoe UI", 9))
@@ -549,29 +702,131 @@ class WireGuardClient(tk.Tk):
 
     def _toggle_log(self) -> None:
         self._log_visible = not self._log_visible
-        parent = self.log_frame.master
         if self._log_visible:
-            self.log_frame.grid()
-            parent.rowconfigure(5, weight=1)
-            self.log_toggle_button.configure(text="Hide Log")
+            for frame in self.log_frames:
+                frame.grid()
+            self._set_log_toggle_text("Hide Log")
         else:
-            self.log_frame.grid_remove()
-            parent.rowconfigure(5, weight=0)
-            self.log_toggle_button.configure(text="Show Log")
+            for frame in self.log_frames:
+                frame.grid_remove()
+            self._set_log_toggle_text("Show Log")
+
+    def _set_log_toggle_text(self, text: str) -> None:
+        self.log_toggle_button.configure(text=text)
+        if self.network_log_toggle_button is not None:
+            self.network_log_toggle_button.configure(text=text)
+
+    def _sync_transport_dependent_controls(self) -> None:
+        if self.bluetooth_disable_wifi_check is None:
+            return
+        if self.transport_var.get() == "tcp":
+            self.network_bluetooth_disable_wifi_var.set(False)
+            self.bluetooth_disable_wifi_check.configure(state="disabled")
+        else:
+            self.bluetooth_disable_wifi_check.configure(state="normal")
 
     def _clear_network_fields(self) -> None:
         self.network_wifi_enabled_var.set(False)
+        self.network_wifi_disable_bluetooth_var.set(False)
         self.network_wifi_ssid_var.set("")
         self.network_wifi_psk_var.set("")
         self.network_ntp_server_var.set("")
         self.network_eth_enabled_var.set(False)
         self.network_ipv6_enabled_var.set(False)
         self.network_bluetooth_enabled_var.set(False)
+        self.network_bluetooth_disable_wifi_var.set(False)
+        self.network_bluetooth_mode_var.set("Random PIN")
+        self.network_bluetooth_pin_var.set("")
         self.network_rsyslog_server_var.set("")
         self.network_address_mode_var.set("-")
         self.network_firmware_var.set("-")
         self.network_status_var.set("Fields cleared")
         self.status_var.set("Fields cleared")
+
+    def _confirm_wifi_disable_bluetooth(self) -> None:
+        if not self.network_wifi_disable_bluetooth_var.get():
+            return
+        confirmed = self._confirm_inline(
+            "Remote Connection Warning",
+            "This option will turn Bluetooth off before enabling Wi-Fi on the next Apply Network action.\n\n"
+            "This can help ESP-based devices that cannot run Wi-Fi and Bluetooth reliably at the same time. It will disconnect Bluetooth clients. "
+            "The Wi-Fi change itself can still restart or move the network path, so a TCP session may disconnect during readback.\n\n"
+            "Keep this option enabled?",
+        )
+        if not confirmed:
+            self.network_wifi_disable_bluetooth_var.set(False)
+
+    def _confirm_bluetooth_disable_wifi(self) -> None:
+        if not self.network_bluetooth_disable_wifi_var.get():
+            return
+        if self.transport_var.get() == "tcp":
+            self.network_bluetooth_disable_wifi_var.set(False)
+            self._confirm_inline(
+                "Option Disabled",
+                "This option is disabled while using a Network/TCP connection.\n\n"
+                "Turning Wi-Fi off first would break the current network path before Bluetooth can be confirmed. Enable Bluetooth first, then manually disable Wi-Fi after reconnecting through another path if needed.",
+                confirm_text="OK",
+                cancel_text=None,
+            )
+            return
+        confirmed = self._confirm_inline(
+            "Remote Connection Warning",
+            "This option will turn Wi-Fi off before enabling Bluetooth on the next Apply Network action.\n\n"
+            "If this configurator is connected over Wi-Fi/TCP, applying this setting will likely disconnect the current session before readback can complete. "
+            "You may need serial, Bluetooth, or another management path to reconnect.\n\n"
+            "Keep this option enabled?",
+        )
+        if not confirmed:
+            self.network_bluetooth_disable_wifi_var.set(False)
+
+    def _confirm_inline(self, title: str, message: str, *, confirm_text: str = "Continue", cancel_text: str | None = "Cancel") -> bool:
+        result = tk.StringVar(value="")
+        overlay = tk.Frame(self, bg="#02070d")
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.lift()
+        card = ttk.Frame(overlay, padding=18, style="Dialog.TFrame")
+        card.place(relx=0.5, rely=0.5, anchor="center", width=520)
+        ttk.Label(card, text=title, style="DialogTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(card, text=message, style="DialogBody.TLabel", wraplength=470, justify="left").grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(12, 18),
+        )
+
+        def choose(value: bool) -> None:
+            result.set("yes" if value else "no")
+
+        if cancel_text is not None:
+            ttk.Button(card, text=cancel_text, command=lambda: choose(False), style="Ghost.TButton").grid(row=2, column=0, sticky="e", padx=(0, 8))
+        ttk.Button(card, text=confirm_text, command=lambda: choose(True), style="Accent.TButton").grid(row=2, column=1, sticky="e")
+        card.columnconfigure(0, weight=1)
+        overlay.grab_set()
+        self.wait_variable(result)
+        overlay.grab_release()
+        overlay.destroy()
+        return result.get() == "yes"
+
+    def _network_apply_warning_text(self, connection: dict[str, Any], wifi_enabled: bool, bluetooth_enabled: bool) -> str:
+        warnings: list[str] = []
+        if wifi_enabled:
+            warnings.append("Wi-Fi will be enabled or updated. This can restart networking or change the route used by the current session.")
+            if self.network_wifi_disable_bluetooth_var.get():
+                warnings.append("Bluetooth will be disabled first. Bluetooth clients will disconnect, but this reduces Wi-Fi/Bluetooth radio conflicts on ESP-based devices.")
+            elif bluetooth_enabled:
+                warnings.append("Bluetooth will remain enabled. Some ESP-based devices cannot reliably run both radios, so Wi-Fi may fail or become unstable.")
+        if bluetooth_enabled:
+            warnings.append("Bluetooth will be enabled or updated.")
+            if self.network_bluetooth_disable_wifi_var.get():
+                warnings.append("Wi-Fi will be disabled first. A Wi-Fi/TCP management session will likely disconnect before readback finishes.")
+            elif wifi_enabled:
+                warnings.append("Wi-Fi will remain enabled. Some ESP-based devices may become unstable when both radios are active.")
+        if connection.get("host"):
+            warnings.append("You are applying this over TCP. Any Wi-Fi change, Wi-Fi disable, or radio conflict can break the remote connection.")
+        if not warnings:
+            warnings.append("Network settings will be written and then read back for confirmation.")
+        return "Apply these network settings?\n\n" + "\n\n".join(warnings)
 
     def _refresh_ports(self) -> None:
         try:
@@ -885,16 +1140,49 @@ class WireGuardClient(tk.Tk):
             return
 
         wifi_enabled = self.network_wifi_enabled_var.get()
+        bluetooth_enabled = self.network_bluetooth_enabled_var.get()
+        disable_bluetooth_for_wifi = self.network_wifi_disable_bluetooth_var.get()
+        disable_wifi_for_bluetooth = self.network_bluetooth_disable_wifi_var.get()
+        if connection.get("host") and disable_wifi_for_bluetooth:
+            disable_wifi_for_bluetooth = False
+            self.network_bluetooth_disable_wifi_var.set(False)
+            self._confirm_inline(
+                "Option Disabled",
+                "Disable Wi-Fi before Bluetooth is not allowed while using a Network/TCP connection.\n\n"
+                "It would turn off the active network path before Bluetooth can be confirmed. Enable Bluetooth first, then manually disable Wi-Fi after reconnecting through another path if needed.",
+                confirm_text="OK",
+                cancel_text=None,
+            )
         wifi_ssid = self.network_wifi_ssid_var.get().strip()
         wifi_psk = self.network_wifi_psk_var.get()
         if wifi_enabled and not wifi_ssid:
             messagebox.showerror("Missing Wi-Fi SSID", "Enter a Wi-Fi SSID before enabling Wi-Fi.")
             return
-        if connection.get("host"):
-            confirmed = messagebox.askyesno(
-                "Apply Network Config",
-                "Changing Wi-Fi or network settings over TCP can disconnect this device. Apply and confirm by readback?",
+        if wifi_enabled and bluetooth_enabled and disable_bluetooth_for_wifi and disable_wifi_for_bluetooth:
+            messagebox.showerror(
+                "Conflicting Radio Options",
+                "Choose one automatic disable direction. Wi-Fi and Bluetooth cannot both disable each other in the same write.",
             )
+            return
+        if wifi_enabled and disable_bluetooth_for_wifi:
+            bluetooth_enabled = False
+        if bluetooth_enabled and disable_wifi_for_bluetooth:
+            wifi_enabled = False
+        try:
+            bluetooth_mode = BLUETOOTH_MODE_TO_VALUE[self.network_bluetooth_mode_var.get()]
+            bluetooth_pin_text = self.network_bluetooth_pin_var.get().strip()
+            bluetooth_fixed_pin = int(bluetooth_pin_text or "0")
+        except (KeyError, ValueError):
+            messagebox.showerror("Invalid Bluetooth PIN", "Bluetooth PIN must be a number.")
+            return
+        if bluetooth_fixed_pin < 0 or bluetooth_fixed_pin > 999999:
+            messagebox.showerror("Invalid Bluetooth PIN", "Bluetooth PIN must be between 0 and 999999.")
+            return
+        if bluetooth_mode == BLUETOOTH_MODE_TO_VALUE["Fixed PIN"] and bluetooth_fixed_pin == 0:
+            messagebox.showerror("Missing Bluetooth PIN", "Enter a non-zero PIN when using Fixed PIN mode.")
+            return
+        if connection.get("host") or disable_bluetooth_for_wifi or disable_wifi_for_bluetooth or (wifi_enabled and bluetooth_enabled):
+            confirmed = self._confirm_inline("Apply Network Config", self._network_apply_warning_text(connection, wifi_enabled, bluetooth_enabled))
             if not confirmed:
                 return
 
@@ -913,7 +1201,11 @@ class WireGuardClient(tk.Tk):
                 eth_enabled=self.network_eth_enabled_var.get(),
                 rsyslog_server=self.network_rsyslog_server_var.get().strip(),
                 ipv6_enabled=self.network_ipv6_enabled_var.get(),
-                bluetooth_enabled=self.network_bluetooth_enabled_var.get(),
+                bluetooth_enabled=bluetooth_enabled,
+                bluetooth_mode=bluetooth_mode,
+                bluetooth_fixed_pin=bluetooth_fixed_pin,
+                disable_bluetooth_first=disable_bluetooth_for_wifi,
+                disable_wifi_first=disable_wifi_for_bluetooth,
                 **connection,
             ),
         )
@@ -1057,8 +1349,15 @@ class WireGuardClient(tk.Tk):
         self.network_eth_enabled_var.set(bool(config.get("eth_enabled", False)))
         self.network_ipv6_enabled_var.set(bool(config.get("ipv6_enabled", False)))
         self.network_bluetooth_enabled_var.set(bool(config.get("bluetooth_enabled", False)))
+        bluetooth_mode = int(config.get("bluetooth_mode", 0) or 0)
+        self.network_bluetooth_mode_var.set(BLUETOOTH_VALUE_TO_MODE.get(bluetooth_mode, "Random PIN"))
+        self.network_bluetooth_pin_var.set(str(config.get("bluetooth_fixed_pin", 0) or ""))
         self.network_rsyslog_server_var.set(str(config.get("rsyslog_server", "") or ""))
-        self.network_address_mode_var.set(str(config.get("address_mode", "-")))
+        address_mode = config.get("address_mode", None)
+        try:
+            self.network_address_mode_var.set(ADDRESS_MODE_TO_TEXT.get(int(address_mode), str(address_mode)))
+        except (TypeError, ValueError):
+            self.network_address_mode_var.set("-")
         self.network_firmware_var.set(str(config.get("firmware_version", "-") or "-"))
         self.network_status_var.set("Network loaded")
         self.status_var.set("Network loaded")
@@ -1112,10 +1411,11 @@ class WireGuardClient(tk.Tk):
 
     def _log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
-        self.log.configure(state="normal")
-        self.log.insert("end", f"[{timestamp}] {message}\n")
-        self.log.see("end")
-        self.log.configure(state="disabled")
+        for log in self.log_widgets:
+            log.configure(state="normal")
+            log.insert("end", f"[{timestamp}] {message}\n")
+            log.see("end")
+            log.configure(state="disabled")
 
 
 def main() -> None:

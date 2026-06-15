@@ -443,6 +443,7 @@ def _bluetooth_to_dict(config: Any) -> dict[str, Any]:
     return {
         "bluetooth_enabled": bool(getattr(config, "enabled", False)),
         "bluetooth_mode": int(getattr(config, "mode", 0)),
+        "bluetooth_fixed_pin": int(getattr(config, "fixed_pin", 0)),
     }
 
 
@@ -548,6 +549,8 @@ def _write_bluetooth_config(
     current: Any,
     *,
     bluetooth_enabled: bool | None,
+    bluetooth_mode: int | None = None,
+    bluetooth_fixed_pin: int | None = None,
     progress: ProgressCallback | None = None,
     cancel_event: CancelEvent | None = None,
 ) -> Any:
@@ -556,6 +559,10 @@ def _write_bluetooth_config(
     outgoing.CopyFrom(current)
     if bluetooth_enabled is not None:
         outgoing.enabled = bluetooth_enabled
+    if bluetooth_mode is not None:
+        outgoing.mode = bluetooth_mode
+    if bluetooth_fixed_pin is not None:
+        outgoing.fixed_pin = bluetooth_fixed_pin
 
     admin = _admin_message()
     admin.set_config.bluetooth.CopyFrom(outgoing)
@@ -844,6 +851,10 @@ def set_network_config(
     rsyslog_server: str | None = None,
     ipv6_enabled: bool | None = None,
     bluetooth_enabled: bool | None = None,
+    bluetooth_mode: int | None = None,
+    bluetooth_fixed_pin: int | None = None,
+    disable_bluetooth_first: bool = False,
+    disable_wifi_first: bool = False,
 ) -> dict[str, dict[str, Any]]:
     values: dict[str, Any] = {}
     for field, value in {
@@ -874,14 +885,35 @@ def set_network_config(
         metadata = _read_device_metadata(node, progress=progress, cancel_event=cancel_event)
         current_network = _refresh_network_config(node, progress=progress, cancel_event=cancel_event)
         current_bluetooth = _refresh_bluetooth_config(node, progress=progress, cancel_event=cancel_event)
-        written_network = _write_network_config(node, current_network, values, progress=progress, cancel_event=cancel_event)
-        written_bluetooth = _write_bluetooth_config(
-            node,
-            current_bluetooth,
-            bluetooth_enabled=bluetooth_enabled,
-            progress=progress,
-            cancel_event=cancel_event,
-        )
+        written_network = current_network
+        written_bluetooth = current_bluetooth
+        if disable_bluetooth_first and bluetooth_enabled is False:
+            written_bluetooth = _write_bluetooth_config(
+                node,
+                current_bluetooth,
+                bluetooth_enabled=False,
+                bluetooth_mode=bluetooth_mode,
+                bluetooth_fixed_pin=bluetooth_fixed_pin,
+                progress=progress,
+                cancel_event=cancel_event,
+            )
+            current_bluetooth = written_bluetooth
+        if disable_wifi_first and values.get("wifi_enabled") is False:
+            written_network = _write_network_config(node, current_network, values, progress=progress, cancel_event=cancel_event)
+            current_network = written_network
+            values = {key: value for key, value in values.items() if key != "wifi_enabled"}
+        if values:
+            written_network = _write_network_config(node, current_network, values, progress=progress, cancel_event=cancel_event)
+        if not (disable_bluetooth_first and bluetooth_enabled is False):
+            written_bluetooth = _write_bluetooth_config(
+                node,
+                current_bluetooth,
+                bluetooth_enabled=bluetooth_enabled,
+                bluetooth_mode=bluetooth_mode,
+                bluetooth_fixed_pin=bluetooth_fixed_pin,
+                progress=progress,
+                cancel_event=cancel_event,
+            )
     finally:
         iface.close()
 

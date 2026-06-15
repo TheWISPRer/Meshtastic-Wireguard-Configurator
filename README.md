@@ -32,13 +32,14 @@ The `WireGuard` section keeps device actions at the top, followed by the selecte
 The `Network` section can read and apply common Meshtastic network settings:
 
 - Wi-Fi enabled state, SSID, and password
+- Wi-Fi/Bluetooth conflict handling for devices that cannot reliably run both radios together
 - NTP server
 - Rsyslog server
 - Ethernet enabled state
 - IPv6 enabled state
-- Bluetooth enabled state
+- Bluetooth enabled state, pairing mode, and fixed PIN
 
-Read the current device config before applying changes. Leaving the Wi-Fi password blank keeps the device's existing password. Some devices cannot reliably keep Wi-Fi and Bluetooth enabled at the same time, so the Network section includes a Bluetooth toggle for turning it off before enabling Wi-Fi. Network writes can interrupt the active TCP management path, especially when changing Wi-Fi settings, so verify readback after the device reconnects.
+Read the current device config before applying changes. Leaving the Wi-Fi password blank keeps the device's existing password. Some ESP-based devices cannot reliably keep Wi-Fi and Bluetooth enabled at the same time, so the Network section includes explicit options to disable Bluetooth before enabling Wi-Fi, or disable Wi-Fi before enabling Bluetooth. The Wi-Fi-off-before-Bluetooth option is disabled when the configurator is connected over Network/TCP because it would break the active management path before Bluetooth can be confirmed. Radio conflict warnings are shown inside the app instead of as separate system dialogs. Verify readback after the device reconnects.
 
 On startup, the GUI checks the latest GitHub Release. When a newer configurator version is available, it shows a small update banner with options to download the new Windows EXE or open the release notes. The app does not replace itself while running; close the current configurator before launching a downloaded update.
 

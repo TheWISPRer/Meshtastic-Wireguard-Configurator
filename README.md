@@ -119,6 +119,8 @@ When configuring over the network, the app pings the selected host before openin
 
 Likely next additions:
 
+- Rebuild onto Electron
+- Web-based client
 - Batch/Fleet deployment and maintenance: load a CSV or JSON device list, apply one config per device, and export a success/failure report.
 - Fallback configuration (FIRMWARE DEPENDENT): save the last confirmed working VPN config before remote writes and restore it if post-change verification fails.
 - Release automation: build and attach `MeshtasticWireGuardConfigurator.exe` to GitHub Releases from CI.

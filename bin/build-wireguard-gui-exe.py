@@ -18,6 +18,7 @@ VENV_DIR = REPO_ROOT / ".wireguard-gui-venv"
 SETUP_SCRIPT = REPO_ROOT / "bin" / "setup-wireguard-gui.py"
 GUI_SCRIPT = REPO_ROOT / "bin" / "wireguard-gui.py"
 CONFIG_SCRIPT = REPO_ROOT / "bin" / "wireguard-config.py"
+ASSETS_DIR = REPO_ROOT / "assets"
 APP_NAME = "MeshtasticWireGuardConfigurator"
 
 
@@ -53,6 +54,8 @@ def main() -> int:
             APP_NAME,
             "--add-data",
             f"{CONFIG_SCRIPT}{separator}.",
+            "--add-data",
+            f"{ASSETS_DIR}{separator}assets",
             "--collect-submodules",
             "meshtastic.protobuf",
             "--hidden-import",

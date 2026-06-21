@@ -2,7 +2,10 @@
 
 Cross-platform configurator for experimental Meshtastic firmware builds that expose `ModuleConfig.wireguard`. Runs on Windows, macOS, and Linux.
 
-This tool lets users import a standard single-peer WireGuard `.conf`, connect over serial or the Meshtastic TCP API, push the config to a device, confirm readback, and monitor basic tunnel health.
+This tool lets users import a standard single-peer WireGuard `.conf`, connect over serial or the Meshtastic TCP API, push the config to a device, confirm readback, tune basic network settings, and monitor basic tunnel health from a gui.
+
+<img width="970" height="715" alt="image" src="https://github.com/user-attachments/assets/d69e2c58-bac6-42a3-9d71-9a0296cffd8d" />
+
 
 ## Quick Start
 
@@ -23,9 +26,25 @@ bin\wireguard-gui.cmd
 On macOS or Linux, use the shell-script launchers instead — see
 [Running on macOS and Linux](#running-on-macos-and-linux).
 
-In the GUI, choose `Serial` for USB-connected devices or `Network` for devices reachable through the Meshtastic TCP API. The default TCP API port is `4403`.
+In the GUI, choose `Serial` for USB-connected devices or `Network` for devices reachable through the Meshtastic TCP API. The default TCP API port is `4403`. Use the top menu to switch between the `WireGuard` and `Network` sections.
 
-The GUI shows progress for each device operation, including network ping status, connection open, request sent, waiting for response, and confirmed response. Use `Cancel` if a device operation is stuck or the wrong IP/port was entered; the app will ignore late results from the cancelled operation and allow a new action.
+The GUI shows progress for each device operation, including network ping status, connection open, request sent, waiting for response, and confirmed response. Use `Cancel` if a device operation is stuck or the wrong IP/port was entered; the app will ignore late results from the cancelled operation and allow a new action. The detailed log is collapsed by default and can be expanded when troubleshooting.
+
+The `WireGuard` section keeps device actions at the top, followed by the selected `.conf` file and device health. Each node should use a unique WireGuard client config; do not reuse the same private key or tunnel address across multiple devices.
+
+The `Network` section can read and apply common Meshtastic network settings:
+
+- Wi-Fi enabled state, SSID, and password
+- Wi-Fi/Bluetooth conflict handling for devices that cannot reliably run both radios together
+- NTP server
+- Rsyslog server
+- Ethernet enabled state
+- IPv6 enabled state
+- Bluetooth enabled state, pairing mode, and fixed PIN
+
+Read the current device config before applying changes. Leaving the Wi-Fi password blank keeps the device's existing password. Some ESP-based devices cannot reliably keep Wi-Fi and Bluetooth enabled at the same time, so the Network section includes explicit options to disable Bluetooth before enabling Wi-Fi, or disable Wi-Fi before enabling Bluetooth. The Wi-Fi-off-before-Bluetooth option is disabled when the configurator is connected over Network/TCP because it would break the active management path before Bluetooth can be confirmed. Radio conflict warnings are shown inside the app instead of as separate system dialogs. Verify readback after the device reconnects.
+
+On startup, the GUI checks the latest GitHub Release. When a newer configurator version is available, it shows a small update banner with options to download the new Windows EXE or open the release notes. The app does not replace itself while running; close the current configurator before launching a downloaded update.
 
 ## Running on macOS and Linux
 
@@ -195,10 +214,15 @@ When configuring over the network, the app pings the selected host before openin
 
 Likely next additions:
 
-- UniFi import: connect to UniFi Network's API, list WireGuard VPN clients, and import a selected client config.
-- Batch deployment: load a CSV or JSON device list, apply one config per device, and export a success/failure report.
-- Fallback configuration: save the last confirmed working VPN config before remote writes and restore it if post-change verification fails.
+- Rebuild onto Electron
+- Web-based client
+- Batch/Fleet deployment and maintenance: load a CSV or JSON device list, apply one config per device, and export a success/failure report.
+- Fallback configuration (FIRMWARE DEPENDENT): save the last confirmed working VPN config before remote writes and restore it if post-change verification fails.
 - Release automation: build and attach `MeshtasticWireGuardConfigurator.exe` to GitHub Releases from CI.
+- Full self-update flow: download, verify, replace the running EXE through a helper process, and restart.
+- Firmware Maintenance to support flashing and updating WireGuard-capable firmware on verified ESP and Linux based nodes (compatible with Batch mode and ability to inject custom Linux patches)
+
+For any future batch deployment workflow, each node must receive its own unique WireGuard client configuration. Reusing the same WireGuard private key or tunnel address across multiple nodes will cause routing and identity conflicts.
 
 ## Compatibility
 

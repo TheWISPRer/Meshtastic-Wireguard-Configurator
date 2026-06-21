@@ -40,7 +40,7 @@ def list_serial_ports() -> list[dict[str, str]]:
 def _import_meshtastic():
     try:
         from meshtastic.mesh_interface import MeshInterface
-        from meshtastic.protobuf import admin_pb2, mesh_pb2, module_config_pb2
+        from meshtastic.protobuf import admin_pb2, config_pb2, mesh_pb2, module_config_pb2
         from meshtastic.serial_interface import SerialInterface
         from meshtastic.tcp_interface import TCPInterface
     except ModuleNotFoundError as exc:
@@ -48,7 +48,7 @@ def _import_meshtastic():
             "meshtastic-python is required. Install it in your active Python environment first."
         ) from exc
     _patch_wireguard_module_config_copy(MeshInterface, mesh_pb2)
-    return SerialInterface, TCPInterface, admin_pb2, module_config_pb2
+    return SerialInterface, TCPInterface, admin_pb2, config_pb2, module_config_pb2
 
 
 def _patch_wireguard_module_config_copy(mesh_interface: Any, mesh_pb2: Any) -> None:
@@ -250,7 +250,7 @@ def _open_interface(
         _progress(progress, f"TCP port reachable: {hostname}:{port_number}")
         _progress(progress, "Loading Meshtastic API.")
         try:
-            _, tcp_interface, _, _ = _import_meshtastic()
+            _, tcp_interface, _, _, _ = _import_meshtastic()
         except BaseException:
             sock.close()
             raise
@@ -273,13 +273,13 @@ def _open_interface(
         return iface
     if port:
         _progress(progress, "Loading Meshtastic API.")
-        serial_interface, _, _, _ = _import_meshtastic()
+        serial_interface, _, _, _, _ = _import_meshtastic()
         iface = serial_interface(devPath=port)
         if interface_callback:
             interface_callback(iface)
         return iface
     _progress(progress, "Loading Meshtastic API.")
-    serial_interface, _, _, _ = _import_meshtastic()
+    serial_interface, _, _, _, _ = _import_meshtastic()
     iface = serial_interface()
     if interface_callback:
         interface_callback(iface)
@@ -287,13 +287,23 @@ def _open_interface(
 
 
 def _admin_message():
-    _, _, admin_pb2, _ = _import_meshtastic()
+    _, _, admin_pb2, _, _ = _import_meshtastic()
     return admin_pb2.AdminMessage()
 
 
 def _new_wireguard_config():
-    _, _, _, module_config_pb2 = _import_meshtastic()
+    _, _, _, _, module_config_pb2 = _import_meshtastic()
     return module_config_pb2.ModuleConfig.WireGuardConfig()
+
+
+def _new_network_config():
+    _, _, _, config_pb2, _ = _import_meshtastic()
+    return config_pb2.Config.NetworkConfig()
+
+
+def _new_bluetooth_config():
+    _, _, _, config_pb2, _ = _import_meshtastic()
+    return config_pb2.Config.BluetoothConfig()
 
 
 def _refresh_wireguard_config(
@@ -413,9 +423,157 @@ def _to_dict(config: Any, show_secrets: bool = False, metadata: dict[str, str] |
     return data
 
 
+def _network_to_dict(config: Any, metadata: dict[str, str] | None = None) -> dict[str, Any]:
+    data = {
+        "wifi_enabled": bool(getattr(config, "wifi_enabled", False)),
+        "wifi_ssid": getattr(config, "wifi_ssid", ""),
+        "wifi_psk": SECRET if getattr(config, "wifi_psk", "") else "",
+        "ntp_server": getattr(config, "ntp_server", ""),
+        "eth_enabled": bool(getattr(config, "eth_enabled", False)),
+        "rsyslog_server": getattr(config, "rsyslog_server", ""),
+        "ipv6_enabled": bool(getattr(config, "ipv6_enabled", False)),
+        "address_mode": int(getattr(config, "address_mode", 0)),
+    }
+    if metadata:
+        data.update(metadata)
+    return data
+
+
+def _bluetooth_to_dict(config: Any) -> dict[str, Any]:
+    return {
+        "bluetooth_enabled": bool(getattr(config, "enabled", False)),
+        "bluetooth_mode": int(getattr(config, "mode", 0)),
+        "bluetooth_fixed_pin": int(getattr(config, "fixed_pin", 0)),
+    }
+
+
 def _set_if_present(config: Any, field: str, value: Any) -> None:
     if value is not None:
         setattr(config, field, value)
+
+
+def _refresh_network_config(
+    node: Any,
+    delay: float = 5.0,
+    *,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+) -> Any:
+    _check_cancel(cancel_event)
+    admin = _admin_message()
+    admin.get_config_request = admin.ConfigType.Value("NETWORK_CONFIG")
+    current = _new_network_config()
+    received = Event()
+
+    def on_response(packet: dict[str, Any]) -> None:
+        try:
+            raw_admin = packet["decoded"]["admin"]["raw"]
+            current.CopyFrom(raw_admin.get_config_response.network)
+        finally:
+            received.set()
+
+    _progress(progress, "Sent network config read request.")
+    node._sendAdmin(admin, wantResponse=True, onResponse=on_response)
+    _progress(progress, "Waiting for network config.")
+    if not received.wait(delay):
+        _check_cancel(cancel_event)
+        raise TimeoutError("Timed out waiting for network config response.")
+    _check_cancel(cancel_event)
+    _progress(progress, "Confirmed network config response.")
+    return current
+
+
+def _refresh_bluetooth_config(
+    node: Any,
+    delay: float = 5.0,
+    *,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+) -> Any:
+    _check_cancel(cancel_event)
+    admin = _admin_message()
+    admin.get_config_request = admin.ConfigType.Value("BLUETOOTH_CONFIG")
+    current = _new_bluetooth_config()
+    received = Event()
+
+    def on_response(packet: dict[str, Any]) -> None:
+        try:
+            raw_admin = packet["decoded"]["admin"]["raw"]
+            current.CopyFrom(raw_admin.get_config_response.bluetooth)
+        finally:
+            received.set()
+
+    _progress(progress, "Sent Bluetooth config read request.")
+    node._sendAdmin(admin, wantResponse=True, onResponse=on_response)
+    _progress(progress, "Waiting for Bluetooth config.")
+    if not received.wait(delay):
+        _check_cancel(cancel_event)
+        raise TimeoutError("Timed out waiting for Bluetooth config response.")
+    _check_cancel(cancel_event)
+    _progress(progress, "Confirmed Bluetooth config response.")
+    return current
+
+
+def _write_network_config(
+    node: Any,
+    current: Any,
+    values: dict[str, Any],
+    *,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+) -> Any:
+    _check_cancel(cancel_event)
+    outgoing = _new_network_config()
+    outgoing.CopyFrom(current)
+
+    for field in ("wifi_enabled", "wifi_ssid", "ntp_server", "eth_enabled", "rsyslog_server", "ipv6_enabled"):
+        if field in values:
+            setattr(outgoing, field, values[field])
+    if values.get("wifi_psk"):
+        outgoing.wifi_psk = values["wifi_psk"]
+
+    admin = _admin_message()
+    admin.set_config.network.CopyFrom(outgoing)
+    on_response = None if node == node.iface.localNode else node.onAckNak
+    _progress(progress, "Sent network config write request.")
+    node._sendAdmin(admin, onResponse=on_response)
+    _progress(progress, "Waiting for network write to settle.")
+    for _ in range(20):
+        time.sleep(0.1)
+        _check_cancel(cancel_event)
+    return outgoing
+
+
+def _write_bluetooth_config(
+    node: Any,
+    current: Any,
+    *,
+    bluetooth_enabled: bool | None,
+    bluetooth_mode: int | None = None,
+    bluetooth_fixed_pin: int | None = None,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+) -> Any:
+    _check_cancel(cancel_event)
+    outgoing = _new_bluetooth_config()
+    outgoing.CopyFrom(current)
+    if bluetooth_enabled is not None:
+        outgoing.enabled = bluetooth_enabled
+    if bluetooth_mode is not None:
+        outgoing.mode = bluetooth_mode
+    if bluetooth_fixed_pin is not None:
+        outgoing.fixed_pin = bluetooth_fixed_pin
+
+    admin = _admin_message()
+    admin.set_config.bluetooth.CopyFrom(outgoing)
+    on_response = None if node == node.iface.localNode else node.onAckNak
+    _progress(progress, "Sent Bluetooth config write request.")
+    node._sendAdmin(admin, onResponse=on_response)
+    _progress(progress, "Waiting for Bluetooth write to settle.")
+    for _ in range(20):
+        time.sleep(0.1)
+        _check_cancel(cancel_event)
+    return outgoing
 
 
 def _strip_cidr(address: str) -> str:
@@ -634,6 +792,138 @@ def set_wireguard_config(
         "confirmed": read_wireguard_config(
             port,
             show_secrets,
+            host=host,
+            tcp_port=tcp_port,
+            timeout=timeout,
+            progress=progress,
+            cancel_event=cancel_event,
+            interface_callback=interface_callback,
+        ),
+    }
+
+
+def read_network_config(
+    port: str | None = None,
+    *,
+    host: str | None = None,
+    tcp_port: int = 4403,
+    timeout: int = 10,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+    interface_callback: InterfaceCallback | None = None,
+) -> dict[str, Any]:
+    _progress(progress, "Opening device connection.")
+    iface = _open_interface(
+        port,
+        host=host,
+        tcp_port=tcp_port,
+        timeout=timeout,
+        progress=progress,
+        cancel_event=cancel_event,
+        interface_callback=interface_callback,
+    )
+    try:
+        _progress(progress, "Connected to device.")
+        metadata = _read_device_metadata(iface.localNode, progress=progress, cancel_event=cancel_event)
+        network = _refresh_network_config(iface.localNode, progress=progress, cancel_event=cancel_event)
+        bluetooth = _refresh_bluetooth_config(iface.localNode, progress=progress, cancel_event=cancel_event)
+        data = _network_to_dict(network, metadata)
+        data.update(_bluetooth_to_dict(bluetooth))
+        return data
+    finally:
+        iface.close()
+
+
+def set_network_config(
+    port: str | None = None,
+    *,
+    host: str | None = None,
+    tcp_port: int = 4403,
+    timeout: int = 10,
+    progress: ProgressCallback | None = None,
+    cancel_event: CancelEvent | None = None,
+    interface_callback: InterfaceCallback | None = None,
+    wifi_enabled: bool | None = None,
+    wifi_ssid: str | None = None,
+    wifi_psk: str | None = None,
+    ntp_server: str | None = None,
+    eth_enabled: bool | None = None,
+    rsyslog_server: str | None = None,
+    ipv6_enabled: bool | None = None,
+    bluetooth_enabled: bool | None = None,
+    bluetooth_mode: int | None = None,
+    bluetooth_fixed_pin: int | None = None,
+    disable_bluetooth_first: bool = False,
+    disable_wifi_first: bool = False,
+) -> dict[str, dict[str, Any]]:
+    values: dict[str, Any] = {}
+    for field, value in {
+        "wifi_enabled": wifi_enabled,
+        "wifi_ssid": wifi_ssid,
+        "wifi_psk": wifi_psk,
+        "ntp_server": ntp_server,
+        "eth_enabled": eth_enabled,
+        "rsyslog_server": rsyslog_server,
+        "ipv6_enabled": ipv6_enabled,
+    }.items():
+        if value is not None:
+            values[field] = value
+
+    _progress(progress, "Opening device connection.")
+    iface = _open_interface(
+        port,
+        host=host,
+        tcp_port=tcp_port,
+        timeout=timeout,
+        progress=progress,
+        cancel_event=cancel_event,
+        interface_callback=interface_callback,
+    )
+    try:
+        _progress(progress, "Connected to device.")
+        node = iface.localNode
+        metadata = _read_device_metadata(node, progress=progress, cancel_event=cancel_event)
+        current_network = _refresh_network_config(node, progress=progress, cancel_event=cancel_event)
+        current_bluetooth = _refresh_bluetooth_config(node, progress=progress, cancel_event=cancel_event)
+        written_network = current_network
+        written_bluetooth = current_bluetooth
+        if disable_bluetooth_first and bluetooth_enabled is False:
+            written_bluetooth = _write_bluetooth_config(
+                node,
+                current_bluetooth,
+                bluetooth_enabled=False,
+                bluetooth_mode=bluetooth_mode,
+                bluetooth_fixed_pin=bluetooth_fixed_pin,
+                progress=progress,
+                cancel_event=cancel_event,
+            )
+            current_bluetooth = written_bluetooth
+        if disable_wifi_first and values.get("wifi_enabled") is False:
+            written_network = _write_network_config(node, current_network, values, progress=progress, cancel_event=cancel_event)
+            current_network = written_network
+            values = {key: value for key, value in values.items() if key != "wifi_enabled"}
+        if values:
+            written_network = _write_network_config(node, current_network, values, progress=progress, cancel_event=cancel_event)
+        if not (disable_bluetooth_first and bluetooth_enabled is False):
+            written_bluetooth = _write_bluetooth_config(
+                node,
+                current_bluetooth,
+                bluetooth_enabled=bluetooth_enabled,
+                bluetooth_mode=bluetooth_mode,
+                bluetooth_fixed_pin=bluetooth_fixed_pin,
+                progress=progress,
+                cancel_event=cancel_event,
+            )
+    finally:
+        iface.close()
+
+    _progress(progress, "Reading back saved network config.")
+    written = _network_to_dict(written_network, metadata)
+    written.update(_bluetooth_to_dict(written_bluetooth))
+    return {
+        "written": written,
+        "confirmed": read_network_config(
+            port,
             host=host,
             tcp_port=tcp_port,
             timeout=timeout,

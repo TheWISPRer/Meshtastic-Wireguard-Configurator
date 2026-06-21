@@ -19,6 +19,76 @@ PROTO_PROFILES = {
     "wireguard": DEFAULT_PROTO_BASE_URL,
     "2.8-wireguard-trial": "https://raw.githubusercontent.com/meshtastic/protobufs/develop/meshtastic",
 }
+
+# Canonical WireGuard protobuf contract.
+#
+# These tag numbers are the single source of truth for the configurator and MUST
+# match the firmware's generated nanopb headers
+# (src/mesh/generated/meshtastic/*.pb.h). Verified against the firmware protobufs
+# submodule as of 2026-06. Whatever proto source is used (legacy fork, upstream +
+# patch, or a local --proto-dir), the installed protobufs are checked against this
+# contract at the end of setup so that silent drift becomes a hard build failure
+# instead of a wire-incompatible client.
+#
+# NOTE: these tags are not yet reserved upstream; the next module merged into
+# meshtastic/protobufs would otherwise claim 17 / 16. See discussion #10716.
+WIREGUARD_CONTRACT = {
+    # message field name -> tag number, on the named container
+    "module_config_field": ("wireguard", 17),
+    "local_module_config_field": ("wireguard", 18),
+    "admin_module_config_type": ("WIREGUARD_CONFIG", 16),
+    "wireguard_config_fields": {
+        "address": 1,
+        "server_addr": 2,
+        "server_port": 3,
+        "private_key": 4,
+        "public_key": 5,
+        "preshared_key": 6,
+        "enabled": 7,
+        "status": 8,
+        "last_error": 9,
+    },
+}
+
+# Runs inside the GUI venv (where the generated protobufs are installed). Expects
+# an `expected` dict in scope; introspects descriptors and exits non-zero with a
+# precise diff if any tag has drifted from the contract.
+_CONTRACT_CHECK_SNIPPET = '''
+import sys
+from meshtastic.protobuf import admin_pb2, localonly_pb2, module_config_pb2
+
+errors = []
+
+def tag(fields_by_name, name):
+    field = fields_by_name.get(name)
+    return None if field is None else field.number
+
+mc_fields = module_config_pb2.ModuleConfig.DESCRIPTOR.fields_by_name
+name, num = expected["module_config_field"]
+if tag(mc_fields, name) != num:
+    errors.append("ModuleConfig.%s tag = %r, expected %d" % (name, tag(mc_fields, name), num))
+
+lm_fields = localonly_pb2.LocalModuleConfig.DESCRIPTOR.fields_by_name
+name, num = expected["local_module_config_field"]
+if tag(lm_fields, name) != num:
+    errors.append("LocalModuleConfig.%s tag = %r, expected %d" % (name, tag(lm_fields, name), num))
+
+mct = admin_pb2.AdminMessage.ModuleConfigType.DESCRIPTOR.values_by_name
+name, num = expected["admin_module_config_type"]
+got = mct[name].number if name in mct else None
+if got != num:
+    errors.append("AdminMessage.ModuleConfigType.%s = %r, expected %d" % (name, got, num))
+
+wg_fields = module_config_pb2.ModuleConfig.WireGuardConfig.DESCRIPTOR.fields_by_name
+for fname, fnum in expected["wireguard_config_fields"].items():
+    if tag(wg_fields, fname) != fnum:
+        errors.append("WireGuardConfig.%s tag = %r, expected %d" % (fname, tag(wg_fields, fname), fnum))
+
+if errors:
+    sys.stderr.write("WireGuard protobuf contract mismatch:\\n  " + "\\n  ".join(errors) + "\\n")
+    raise SystemExit(1)
+print("WireGuard protobuf contract verified (%d fields)." % len(expected["wireguard_config_fields"]))
+'''
 WIREGUARD_CONFIG_PROTO = r'''
   /*
    * Configuration for the experimental WireGuard VPN client
@@ -277,12 +347,16 @@ def _install_branch_protobufs(python: Path) -> None:
     for generated in source.glob("*_pb2.py"):
         shutil.copy2(generated, target / generated.name)
 
-    check = (
-        "from meshtastic.protobuf import localonly_pb2, module_config_pb2; "
-        "m = module_config_pb2.ModuleConfig(); "
-        "lm = localonly_pb2.LocalModuleConfig(); "
-        "raise SystemExit(0 if hasattr(m, 'wireguard') and hasattr(lm, 'wireguard') else 1)"
-    )
+    _verify_wireguard_contract(python)
+
+
+def _verify_wireguard_contract(python: Path) -> None:
+    """Fail the build if the installed protobufs drift from WIREGUARD_CONTRACT.
+
+    This is the single point that turns silent wire-incompatibility (e.g. a tag
+    renumber upstream) into a loud, actionable error.
+    """
+    check = "expected = " + repr(WIREGUARD_CONTRACT) + "\n" + _CONTRACT_CHECK_SNIPPET
     _run([str(python), "-c", check])
 
 
@@ -308,7 +382,10 @@ def main() -> int:
 
     print()
     print(f"WireGuard GUI environment is ready: {VENV_DIR}")
-    print("Launch with: bin\\wireguard-gui.cmd")
+    if sys.platform == "win32":
+        print("Launch with: bin\\wireguard-gui.cmd")
+    else:
+        print("Launch with: bin/wireguard-gui.sh")
     return 0
 
 

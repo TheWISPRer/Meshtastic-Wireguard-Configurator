@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Build a Windows executable for the WireGuard GUI."""
+"""Build a standalone executable for the WireGuard GUI.
+
+PyInstaller is not a cross-compiler, so this produces a binary for the OS it runs
+on: a `.exe` on Windows, a `.app` bundle on macOS, and a plain executable on Linux.
+"""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -29,16 +34,13 @@ def _run(command: list[str]) -> None:
 
 
 def main() -> int:
-    if sys.platform != "win32":
-        print("This build script is intended for Windows executable packaging.")
-        return 1
-
     python = _venv_python()
     if not python.exists():
         _run([sys.executable, str(SETUP_SCRIPT)])
 
     _run([str(python), "-m", "pip", "install", "pyinstaller"])
-    separator = ";"
+    # PyInstaller's --add-data uses ';' on Windows and ':' elsewhere.
+    separator = os.pathsep
     _run(
         [
             str(python),
@@ -66,9 +68,14 @@ def main() -> int:
         ]
     )
 
-    exe = REPO_ROOT / "dist" / f"{APP_NAME}.exe"
+    if sys.platform == "win32":
+        artifact = REPO_ROOT / "dist" / f"{APP_NAME}.exe"
+    elif sys.platform == "darwin":
+        artifact = REPO_ROOT / "dist" / f"{APP_NAME}.app"
+    else:
+        artifact = REPO_ROOT / "dist" / APP_NAME
     print()
-    print(f"Built: {exe}")
+    print(f"Built: {artifact}")
     return 0
 
 

@@ -1,0 +1,6 @@
+# Shell scripts must use LF endings or they break on macOS/Linux
+# (a CRLF shebang makes the interpreter path invalid).
+*.sh text eol=lf
+
+# Windows launchers stay CRLF
+*.cmd text eol=crlf

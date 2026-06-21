@@ -1,6 +1,6 @@
 # Meshtastic WireGuard Configurator
 
-Simple Windows-friendly configurator for experimental Meshtastic firmware builds that expose `ModuleConfig.wireguard`.
+Cross-platform configurator for experimental Meshtastic firmware builds that expose `ModuleConfig.wireguard`. Runs on Windows, macOS, and Linux.
 
 This tool lets users import a standard single-peer WireGuard `.conf`, connect over serial or the Meshtastic TCP API, push the config to a device, confirm readback, tune basic network settings, and monitor basic tunnel health from a gui.
 
@@ -9,7 +9,7 @@ This tool lets users import a standard single-peer WireGuard `.conf`, connect ov
 
 ## Quick Start
 
-1. Install Python 3 for Windows.
+1. Install Python 3.
 2. Clone or download this repo.
 3. Run the one-time setup:
 
@@ -22,6 +22,9 @@ bin\setup-wireguard-gui.cmd
 ```powershell
 bin\wireguard-gui.cmd
 ```
+
+On macOS or Linux, use the shell-script launchers instead — see
+[Running on macOS and Linux](#running-on-macos-and-linux).
 
 In the GUI, choose `Serial` for USB-connected devices or `Network` for devices reachable through the Meshtastic TCP API. The default TCP API port is `4403`. Use the top menu to switch between the `WireGuard` and `Network` sections.
 
@@ -43,18 +46,54 @@ Read the current device config before applying changes. Leaving the Wi-Fi passwo
 
 On startup, the GUI checks the latest GitHub Release. When a newer configurator version is available, it shows a small update banner with options to download the new Windows EXE or open the release notes. The app does not replace itself while running; close the current configurator before launching a downloaded update.
 
-## Build A Windows EXE
+## Running on macOS and Linux
 
-To package a single-file executable:
+> **Note:** The macOS/Linux launchers and build path have not yet been tested on
+> real macOS or Linux hardware — the code is platform-neutral by construction, but
+> treat this path as experimental and please report any issues.
+
+The engine and GUI are pure Python (the GUI uses tkinter), so they run on macOS
+and Linux as well. Use the `.sh` launchers instead of the `.cmd` ones:
+
+```bash
+# One-time setup
+bin/setup-wireguard-gui.sh
+
+# Launch the GUI
+bin/wireguard-gui.sh
+```
+
+Requirements:
+
+- **Python 3** with **tkinter**. tkinter ships with the python.org installers on
+  macOS and Windows, but on many Linux distributions it is a separate package —
+  e.g. `sudo apt install python3-tk` (Debian/Ubuntu) or `sudo dnf install
+  python3-tkinter` (Fedora).
+- Serial access on Linux usually requires your user to be in the `dialout` (or
+  `uucp`) group so the device shows up as `/dev/ttyUSB*` / `/dev/ttyACM*`.
+
+Everything else — CLI usage, RPC mode, and the protobuf setup profiles below —
+works identically; just swap the Windows path separators in the examples.
+
+## Build A Standalone Executable
+
+To package a single-file executable for the current platform:
 
 ```powershell
 bin\build-wireguard-gui-exe.cmd
 ```
 
-The executable is written to:
+```bash
+bin/build-wireguard-gui-exe.sh
+```
+
+PyInstaller is not a cross-compiler, so the build produces a binary for whatever
+OS you run it on:
 
 ```text
-dist\MeshtasticWireGuardConfigurator.exe
+dist\MeshtasticWireGuardConfigurator.exe   # Windows
+dist/MeshtasticWireGuardConfigurator.app   # macOS
+dist/MeshtasticWireGuardConfigurator       # Linux
 ```
 
 Generated `dist`, `build`, `.spec`, and `.wireguard-gui-venv` files are local artifacts and should not be committed.
@@ -102,6 +141,62 @@ Disable automatic startup without erasing saved keys:
 ```powershell
 python bin\wireguard-config.py --port COM12 disable
 ```
+
+List available serial ports as JSON (no device connection required):
+
+```powershell
+python bin\wireguard-config.py list-ports
+```
+
+Validate a WireGuard `.conf` and preview the parsed fields without connecting to a
+device (useful for UI validation; secrets redacted unless `--show-secrets`):
+
+```powershell
+python bin\wireguard-config.py parse-conf --config wg0.conf
+```
+
+All commands emit JSON on stdout and report errors on stderr with a non-zero exit
+code, so the tool can be driven as a subprocess by another front-end.
+
+### RPC mode (newline-delimited JSON)
+
+Pass the global `--rpc` flag to switch stdout from a single pretty-printed result
+to a stream of newline-delimited JSON events. This is the contract a front-end
+(e.g. the planned Electron app) binds to when running the engine as a subprocess:
+
+```powershell
+python bin\wireguard-config.py --rpc --port COM12 get
+```
+
+Each line is one self-contained JSON object carrying the schema version `v`:
+
+```json
+{"v":1,"type":"progress","message":"Opening device connection."}
+{"v":1,"type":"progress","message":"Connected to device."}
+{"v":1,"type":"result","data":{ "...the same payload the command prints by default..." }}
+```
+
+Exactly one terminal event is emitted per run: `result` (exit 0) or, on failure,
+an `error` event (exit 1) on **stdout** instead of stderr:
+
+```json
+{"v":1,"type":"error","message":"WireGuard config is missing an [Interface] section.","kind":"parse_error"}
+```
+
+The `kind` lets a front-end react programmatically instead of parsing English:
+
+| `kind` | Cause |
+| --- | --- |
+| `parse_error` | Invalid arguments or `.conf` (missing section, bad endpoint/address, `--port` and `--host` together) |
+| `connection_error` | Cannot reach the device — socket/host resolution failure, or `meshtastic-python`/`pyserial` not installed |
+| `timeout` | TCP connect or config readback timed out |
+| `cancelled` | The operation was cancelled (host-cancel path) |
+| `internal` | Any other unexpected error |
+
+`--rpc` is additive and opt-in; without it the default single-JSON / stderr
+behavior is unchanged. The `v` field is the event-contract version (currently
+`1`); a non-additive change to the envelope bumps it so a client can reject an
+incompatible engine.
 
 The importer reads:
 
@@ -153,7 +248,29 @@ To use a local protobuf checkout instead of downloading:
 python bin\setup-wireguard-gui.py --proto-dir C:\path\to\Meshtastic\protobufs\meshtastic
 ```
 
-Once WireGuard configuration lands in official Meshtastic protobufs and `meshtastic-python`, this compatibility layer can be simplified or removed.
+### Protobuf contract verification
+
+Regardless of which proto source is used (firmware branch download, upstream 2.8
+protos plus overlay, or a local `--proto-dir`), setup ends by verifying the
+generated Python protobufs against a single declared contract
+(`WIREGUARD_CONTRACT` in `bin/setup-wireguard-gui.py`):
+
+- `ModuleConfig.wireguard` = field 17
+- `LocalModuleConfig.wireguard` = field 18
+- `AdminMessage.ModuleConfigType.WIREGUARD_CONFIG` = 16
+- `WireGuardConfig` fields 1-9: `address`, `server_addr`, `server_port`,
+  `private_key`, `public_key`, `preshared_key`, `enabled`, `status`, `last_error`
+
+These tag numbers must match the firmware's generated nanopb headers
+(`src/mesh/generated/meshtastic/*.pb.h`). If any tag has drifted, setup **fails
+with a precise diff** instead of silently producing a client that is
+wire-incompatible with the device. This guards against the scenario where
+upstream Meshtastic assigns one of these (currently unreserved) tags to a
+different module. See [discussion #10716](https://github.com/meshtastic/firmware/discussions/10716).
+
+Once WireGuard configuration lands in official Meshtastic protobufs and
+`meshtastic-python` — ideally with these tags reserved upstream — this
+compatibility layer can be simplified or removed.
 
 ## Firmware Requirement
 
